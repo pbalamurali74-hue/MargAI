@@ -11,14 +11,20 @@
   "scripts": {
     "build:packages": "npm run build -w packages/contracts && npm run build -w packages/localization && npm run build -w packages/risk-engine",
     "build:services": "npm run build -w services/assistance && npm run build -w services/api",
-    "build:web": "npm run build -w apps/web",
+    "build:web": "npm run prepare:vision && npm run build -w apps/web",
     "build": "npm run build:packages && npm run build:services && npm run build:web",
     "test": "vitest run",
     "dev": "concurrently -n \"API,WEB\" -c \"cyan,green\" \"npm run dev -w services/api\" \"npm run dev -w apps/web\"",
     "dev:api": "npm run dev -w services/api",
     "dev:web": "npm run dev -w apps/web",
     "start": "node services/api/dist/index.js",
-    "lint": "echo \"Linting clean\""
+    "lint": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p services/api/tsconfig.json",
+    "build:ui-preview": "npm run build:packages && npm run build:web && node scripts/prepare-ui-preview.mjs",
+    "verify": "npm test && npm run build",
+    "test:integration": "node scripts/verify-demo.cjs",
+    "dev:phone": "node scripts/local-phone-demo.cjs",
+    "prepare:vision": "node scripts/sync-vision-assets.mjs",
+    "predev": "npm run prepare:vision"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

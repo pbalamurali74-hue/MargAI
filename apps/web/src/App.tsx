@@ -1,118 +1,68 @@
-import React, { useState, useEffect } from 'react';
-import { Navbar, TabType } from './components/Navbar';
-import { CommandCenter } from './components/CommandCenter';
-import { DriverCompanion } from './components/DriverCompanion';
-import { BuildathonDeck } from './components/BuildathonDeck';
-import { CivicDashboard } from './components/CivicDashboard';
-import { GoogleStackInspector } from './components/GoogleStackInspector';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
+import { BrandMark, Navbar, TabType, VIEWS } from './components/Navbar';
 import { PublicSite } from './components/PublicSite';
-import { SmartphoneDashcam } from './components/SmartphoneDashcam';
-import { InCarDisplay } from './components/InCarDisplay';
 import { apiClient } from './services/apiClient';
+import {I18nProvider,isUiLanguage,translate,useI18n} from './i18n';
 
+const SmartphoneDashcam = lazy(() => import('./components/SmartphoneDashcam').then(module => ({ default: module.SmartphoneDashcam })));
+const InCarDisplay = lazy(() => import('./components/InCarDisplay').then(module => ({ default: module.InCarDisplay })));
+const CivicDashboard = lazy(() => import('./components/CivicDashboard').then(module => ({ default: module.CivicDashboard })));
+const GoogleStackInspector = lazy(() => import('./components/GoogleStackInspector').then(module => ({ default: module.GoogleStackInspector })));
+
+const LiveMap = lazy(() => import('./components/LiveMap').then(module => ({ default: module.LiveMap })));
+const DriveMap = lazy(() => import('./components/DriveMap').then(module => ({ default: module.DriveMap })));
+function readView(): TabType {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get('view');
+  if (VIEWS.some(item => item.id === view)) return view as TabType;
+  if (/smartphone|phone/.test(window.location.search)) return 'smartphone';
+  if (/in-car|cockpit|infotainment/.test(window.location.search)) return 'in-car';
+  return 'public';
+}
 export const App: React.FC = () => {
-  // Check URL query parameters for direct tablet/phone mount
-  const search = typeof window !== 'undefined' ? window.location.search : '';
-  const isPhoneUrl = search.includes('smartphone') || search.includes('phone');
-  const isCommandCenterUrl = search.includes('command-center') || search.includes('3-pane');
 
-  const defaultTab: TabType = isPhoneUrl ? 'smartphone' : isCommandCenterUrl ? 'command-center' : 'in-car';
-  const [currentTab, setCurrentTab] = useState<TabType>(defaultTab);
-  const [selectedLanguage, setSelectedLanguage] = useState<string>('hi');
-  const [isBackendConnected, setIsBackendConnected] = useState<boolean>(true);
-
-  // Poll health status
+  const [currentTab, setCurrentTab] = useState<TabType>(readView);
+  const [selectedLanguage, setSelectedLanguage] = useState(() => { try { const saved=localStorage.getItem('margai-language')||'en'; return isUiLanguage(saved)?saved:'en'; } catch { return 'en'; } });
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const navigate = (tab: TabType) => {
+    const url = new URL(window.location.href); const keep = url.searchParams.get('code'); url.search = ''; if (tab === 'car' && keep) url.searchParams.set('code', keep);
+    if (tab !== 'public') url.searchParams.set('view', tab);
+    if (tab !== currentTab) window.history.pushState({}, '', url);
+    setCurrentTab(tab); window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+  useEffect(() => { const onPopState = () => setCurrentTab(readView()); window.addEventListener('popstate', onPopState); return () => window.removeEventListener('popstate', onPopState); }, []);
+  useEffect(() => { document.title = `${translate(selectedLanguage,VIEWS.find(item => item.id === currentTab)?.label || 'Home')} · MargAI`; document.documentElement.lang=selectedLanguage; }, [currentTab,selectedLanguage]);
+  useEffect(() => { try { localStorage.setItem('margai-language', selectedLanguage); } catch { /* Optional storage. */ } }, [selectedLanguage]);
   useEffect(() => {
-    const checkHealth = async () => {
-      try {
-        const res = await apiClient.getHealth();
-        if (res.status === 'ok') {
-          setIsBackendConnected(true);
-        }
-      } catch (err) {
-        setIsBackendConnected(false);
-      }
-    };
-
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
+    if (location.hostname.endsWith('github.io') && !import.meta.env.VITE_API_ORIGIN) return;
+    let active = true;
+    const checkHealth = async () => { try { const result = await apiClient.getHealth(); if (active) setIsBackendConnected(result.status === 'ok'); } catch { if (active) setIsBackendConnected(false); } };
+    checkHealth(); const interval = window.setInterval(checkHealth, 15000);
+    return () => { active = false; window.clearInterval(interval); };
   }, []);
-
-  return (
-    <div className="min-h-screen bg-[#090D16] text-slate-100 flex flex-col font-['Plus_Jakarta_Sans',sans-serif]">
-      {/* Top Sticky Navigation */}
-      <Navbar
-        currentTab={currentTab}
-        onSelectTab={setCurrentTab}
-        selectedLanguage={selectedLanguage}
-        onSelectLanguage={setSelectedLanguage}
-        isBackendConnected={isBackendConnected}
-      />
-
-      {/* Main Content Pane */}
-      <main className="flex-1">
-        {currentTab === 'command-center' && (
-          <CommandCenter selectedLanguage={selectedLanguage} />
-        )}
-
-        {currentTab === 'in-car' && (
-          <InCarDisplay />
-        )}
-
-        {currentTab === 'smartphone' && (
-          <SmartphoneDashcam />
-        )}
-
-        {currentTab === 'driver' && (
-          <DriverCompanion selectedLanguage={selectedLanguage} />
-        )}
-
-        {currentTab === 'deck' && (
-          <BuildathonDeck onLaunchHUD={() => setCurrentTab('command-center')} />
-        )}
-
-        {currentTab === 'civic' && <CivicDashboard />}
-
-        {currentTab === 'google-stack' && <GoogleStackInspector />}
-
-        {currentTab === 'public' && (
-          <PublicSite
-            onNavigateTab={setCurrentTab}
-            selectedLanguage={selectedLanguage}
-          />
-        )}
-      </main>
-
-      {/* Sleek Command Center Footer with Google 4-Color Branding */}
-      <footer className="border-t border-[#1E293B] bg-[#07090F] py-4 px-4 lg:px-8 text-xs text-slate-400">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="grid grid-cols-2 gap-0.5 w-4 h-4">
-              <div className="bg-[#4285F4] rounded-tl-sm"></div>
-              <div className="bg-[#EA4335] rounded-tr-sm"></div>
-              <div className="bg-[#FBBC05] rounded-bl-sm"></div>
-              <div className="bg-[#34A853] rounded-br-sm"></div>
-            </div>
-            <span className="font-extrabold text-white tracking-wide">MargAI</span>
-            <span className="text-slate-400 font-mono text-[11px]">
-              — Automotive Command Center HUD & Civic Intelligence
-            </span>
-          </div>
-
-          <div className="flex items-center gap-3 text-slate-400 font-mono text-[11px]">
-            <span className="text-[#34A853]">✓ Relay Online</span>
-            <span>·</span>
-            <span className="text-[#4285F4]">Google DeepMind</span>
-            <span>·</span>
-            <span className="text-[#EA4335]">Google Cloud</span>
-            <span>·</span>
-            <span>Startup Buildathon India 2026</span>
-          </div>
-        </div>
-      </footer>
-    </div>
-  );
+  return <I18nProvider language={selectedLanguage}><div className="app-shell">
+    <a href="#main-content" className="skip-link">{translate(selectedLanguage,'Skip to content')}</a>
+    <Navbar currentTab={currentTab} onSelectTab={navigate} selectedLanguage={selectedLanguage} onSelectLanguage={language=>{if(isUiLanguage(language))setSelectedLanguage(language);}} isBackendConnected={isBackendConnected}/>
+    <main id="main-content" className={currentTab === 'public' ? 'main-content' : 'main-content workspace-view'} tabIndex={-1}><Suspense fallback={<div className="view-loading" role="status"><span className="loading-road"/>{translate(selectedLanguage,'Loading…')}</div>}>
+      {currentTab === 'public' && <PublicSite onNavigateTab={navigate} selectedLanguage={selectedLanguage}/>}
+      {currentTab === 'command-center' && <DriveMap onNavigate={navigate}/>}
+      {currentTab === 'in-car' && <div className="road-showcase"><InCarDisplay/></div>}
+      {currentTab === 'live' && <LiveMap mode="observer" onNavigate={navigate}/>}
+      {currentTab === 'car' && <LiveMap mode="car" onNavigate={navigate}/>}
+      {currentTab === 'app' && <SmartphoneDashcam/>}
+      {currentTab === 'smartphone' && <div className="camera-showcase"><SmartphoneDashcam/></div>}
+      {currentTab === 'journey' && <DriveMap onNavigate={navigate}/>}
+      {currentTab === 'driver' && <DriveMap onNavigate={navigate}/>}
+      {currentTab === 'deck' && <PublicSite onNavigateTab={navigate} selectedLanguage={selectedLanguage}/>}
+      {currentTab === 'civic' && <CivicDashboard/>}
+      {currentTab === 'google-stack' && <GoogleStackInspector/>}
+    </Suspense></main>
+    <SimpleFooter onNavigate={navigate}/>
+  </div></I18nProvider>;
 };
+function SimpleFooter({onNavigate}:{onNavigate:(view:TabType)=>void}){
+  const {t}=useI18n();
+  return <footer className="site-footer"><div className="footer-inner"><BrandMark/><span>{t('Shared awareness. Better journeys.')}</span><span className="footer-tech">{t('Built with Google technology')}</span></div></footer>;
+}
 
 export default App;

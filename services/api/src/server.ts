@@ -5,6 +5,8 @@ import { storageEngine } from './store';
 import { geminiService } from '@margai/assistance';
 import { realtimeRelay } from './relay';
 import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import { existsSync, readFileSync } from 'fs';
 
 export function createExpressApp(): express.Application {
   const app = express();
@@ -88,6 +90,11 @@ export function createExpressApp(): express.Application {
       verificationState: hazard.verificationState,
       caseUpdated: caseUpdated ? { id: caseUpdated.id, status: caseUpdated.status } : undefined,
     });
+  });
+
+  // Demo support: replayable simulated journeys (never touches live or surveyed records).
+  app.post('/v1/simulation/reset', (req: Request, res: Response) => {
+    res.json({ status: 'ok', removedHazards: storageEngine.resetSimulated() });
   });
 
   // 4. Hazards: List by corridor
@@ -189,8 +196,8 @@ export function createExpressApp(): express.Application {
         ...current.authority,
         complaintNumber,
         submissionDate,
-        acknowledgementNotes: 'Case acknowledged by BBMP Control Room. Dispatched to Ward 85 Quick Response Team (QRT).',
-        statusUrl: `https://bbmp.gov.in/sahaaya/track/${complaintNumber}`,
+        acknowledgementNotes: 'Demo submission recorded locally. No authority was contacted.',
+        statusUrl: undefined,
       },
       auditTrail: [
         ...current.auditTrail,
@@ -198,7 +205,7 @@ export function createExpressApp(): express.Application {
           timestamp: submissionDate,
           action: 'AUTHORITY_SUBMISSION',
           actor: 'MargAI Civic Dispatcher',
-          notes: `Ticket dispatched to ${current.authority.name}. Ref: ${complaintNumber}`,
+          notes: `Demo submission for ${current.authority.name}. No authority contacted. Ref: ${complaintNumber}`,
         },
       ],
     }));
@@ -219,6 +226,7 @@ export function createExpressApp(): express.Application {
   // 10. System Configuration
   app.get('/v1/config', (req: Request, res: Response) => {
     res.json({
+      phoneWebOrigin: (() => { try { const value = readFileSync(path.resolve(__dirname, '../../../apps/web/certs/phone-origin.txt'), 'utf8').trim(); const url = new URL(value); return url.protocol === 'https:' ? url.origin : null; } catch { return null; } })(),
       googleMapsApiKeyConfigured: !!process.env.VITE_GOOGLE_MAPS_API_KEY,
       geminiConfigured: geminiService.isConfigured(),
       firestoreConnected: storageEngine.isFirestoreLive,
@@ -274,6 +282,19 @@ export function createExpressApp(): express.Application {
       res.status(500).json({ error: 'Failed to read inference samples', details: e.message });
     }
   });
+
+  // Serve the built interface from the same Cloud Run service as the existing API.
+  // Vite continues to serve the frontend separately during local development.
+  const webDirectory = path.resolve(__dirname, '../../../apps/web/dist');
+  if (existsSync(path.join(webDirectory, 'index.html'))) {
+    app.use(express.static(webDirectory));
+    app.get('*', (req: Request, res: Response) => {
+      if (/^\/(v1|api|health)(\/|$)/.test(req.path)) {
+        return res.status(404).json({ error: 'This API capability is not available on this service.' });
+      }
+      return res.sendFile(path.join(webDirectory, 'index.html'));
+    });
+  }
 
   return app;
 }

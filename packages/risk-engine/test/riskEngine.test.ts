@@ -222,3 +222,19 @@ describe('MargAI Risk Engine Conformance Tests', () => {
     expect(safePedestrian.messageKey).toBe('none');
   });
 });
+
+import { describe as d2, it as it2, expect as ex2 } from 'vitest';
+import { evaluateHazardForDriver as evalAlert } from '../src';
+d2('corridor relevance (opposite carriageway & service road)', () => {
+  const hazard: any = { id: 'h1', type: 'pothole', revision: 1, location: { latitude: 12.9275, longitude: 77.6842, horizontalAccuracyM: 1, provenance: 'measured' },
+    roadReference: { corridorId: 'c', edgeId: 'main_fwd', roadName: 'x', carriageway: 'forward' }, directionApplicability: 'same_direction' };
+  const pose = { latitude: 12.9295, longitude: 77.6870, headingDeg: 225, speedMps: 14, horizontalAccuracyM: 2 };
+  it2('warns a trailing vehicle on the same edge', () => {
+    const a = evalAlert(hazard, pose, { currentCorridorId: 'c', currentEdgeId: 'main_fwd', upcomingEdgeIds: [] });
+    ex2(a?.relevanceResult).toBe(true);
+  });
+  it2('does not warn the opposite carriageway or a parallel service road', () => {
+    ex2(evalAlert(hazard, { ...pose, headingDeg: 45 }, { currentCorridorId: 'c', currentEdgeId: 'main_rev', upcomingEdgeIds: [] })).toBeNull();
+    ex2(evalAlert(hazard, pose, { currentCorridorId: 'c', currentEdgeId: 'service_fwd', upcomingEdgeIds: [] })).toBeNull();
+  });
+});

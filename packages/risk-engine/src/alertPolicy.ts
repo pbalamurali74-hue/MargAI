@@ -40,8 +40,13 @@ export function evaluateHazardForDriver(
   const isCurrentEdge = hazard.roadReference.edgeId === routeContext.currentEdgeId;
   const isUpcomingEdge = routeContext.upcomingEdgeIds.includes(hazard.roadReference.edgeId);
 
-  if (!isSameCorridor && !isCurrentEdge && !isUpcomingEdge) {
-    // If not matching corridor/edge, reject (e.g., parallel service road vs flyover)
+  if (!isSameCorridor) {
+    return null;
+  }
+  // The hazard must sit on the driver's current or upcoming connected edges.
+  // Opposite carriageways and parallel service roads share the corridor but not the edge.
+  if (!isCurrentEdge && !isUpcomingEdge) {
+    reasonCodes.push('NOT_ON_DRIVER_ROUTE');
     return null;
   }
 
@@ -80,6 +85,12 @@ export function evaluateHazardForDriver(
       expiry: new Date(Date.now() + 5000).toISOString(),
       reasonCodes,
     };
+  }
+
+  // 4b. Ignore hazards well off the vehicle's path (adjacent lane / other road)
+  if (decomp.distanceAheadM <= 150 && Math.abs(decomp.lateralOffsetM) > 30) {
+    reasonCodes.push('LATERALLY_OFFSET');
+    return null;
   }
 
   // 5. Lookahead distance boundary
@@ -127,6 +138,25 @@ export function evaluateHazardForDriver(
     riskLevel = 'caution';
     messageKey = 'visibility.low';
     reasonCodes.push('FOG_DENSE_HAZE_CORRIDOR');
+  } else if (hazard.type === 'animal' || hazard.type === 'pedestrian') {
+    const road = hazard.type === 'animal' ? 'animal' : 'pedestrian';
+    if (decomp.distanceAheadM <= 45 && effectiveSpeed > 3) {
+      riskLevel = 'urgent';
+      messageKey = `hazard.${road}.path_conflict`;
+      reasonCodes.push('ROAD_USER_IN_PATH');
+    } else if (decomp.distanceAheadM <= 160) {
+      riskLevel = 'caution';
+      messageKey = `hazard.${road}.ahead_caution`;
+      reasonCodes.push('ROAD_USER_AHEAD');
+    } else {
+      riskLevel = 'information';
+      messageKey = `hazard.${road}.ahead_caution`;
+      reasonCodes.push('ROAD_USER_REPORTED');
+    }
+  } else if (hazard.type === 'collision_risk') {
+    riskLevel = decomp.distanceAheadM <= 120 ? 'urgent' : 'caution';
+    messageKey = 'hazard.incident.ahead_unverified';
+    reasonCodes.push('COLLISION_RISK_REPORTED');
   } else {
     // Other hazards
     riskLevel = decomp.distanceAheadM <= 50 ? 'caution' : 'information';

@@ -1,519 +1,215 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  Car,
-  Camera,
-  Volume2,
-  VolumeX,
-  Thermometer,
-  ShieldCheck,
-  RefreshCw,
-  MapPin,
-  Eye,
-  SlidersHorizontal,
-  Zap,
-} from 'lucide-react';
-import {
-  Hazard,
-  DriverAlert,
-  Observation,
-  VehiclePose,
-} from '@margai/contracts';
+import React, { useEffect, useRef, useState } from 'react';
+import { Activity, Camera, Car, Check, ChevronDown, CornerUpRight, Eye, Radio, Thermometer, Volume2, VolumeX } from 'lucide-react';
+import { DriverAlert, Hazard, Observation, VehiclePose } from '@margai/contracts';
 import { audioSynthesizer, getLocalizedMessage } from '@margai/localization';
 import { apiClient } from '../services/apiClient';
 import { HazardPictogram, HazardIconType } from './HazardPictogram';
+import { UI_LANGUAGES, useI18n } from '../i18n';
 
-interface DriverCompanionProps {
-  selectedLanguage: string;
-}
+interface DriverCompanionProps { selectedLanguage: string; }
+const languages = UI_LANGUAGES.map(language => ({code:language.code, label:language.nativeName}));
+const thermalModes = ['normal', 'warm', 'hot', 'critical'] as const;
+type ThermalMode = typeof thermalModes[number];
+const pose: VehiclePose = { latitude: 12.9372, longitude: 77.6953, headingDeg: 220, speedMps: 15, horizontalAccuracyM: 1.8 };
 
-export const DriverCompanion: React.FC<DriverCompanionProps> = ({
-  selectedLanguage: initialLang,
-}) => {
-  const [currentLang, setCurrentLang] = useState<string>(initialLang || 'hi');
-  const [driveMode, setDriveMode] = useState<'cockpit' | 'camera'>('cockpit');
+export const DriverCompanion: React.FC<DriverCompanionProps> = ({ selectedLanguage }) => {
+  const { t } = useI18n();
+  const [currentLang, setCurrentLang] = useState(selectedLanguage || 'en');
+  const [view, setView] = useState<'route' | 'camera'>('route');
   const [activeAlert, setActiveAlert] = useState<DriverAlert | null>(null);
   const [hazards, setHazards] = useState<Hazard[]>([]);
-  const [thermalState, setThermalState] = useState<'normal' | 'warm' | 'hot' | 'critical'>('normal');
-  const [audioRoute, setAudioRoute] = useState<'car_bluetooth' | 'phone_speaker'>('car_bluetooth');
+  const [thermalState, setThermalState] = useState<ThermalMode>('normal');
   const [isMuted, setIsMuted] = useState(false);
-  const [relayLatencyMs, setRelayLatencyMs] = useState<number>(24);
   const [cameraActive, setCameraActive] = useState(false);
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [cameraError, setCameraError] = useState('');
+  const [statusMessage, setStatusMessage] = useState('Choose a scenario below.');
+  const [relayConnected, setRelayConnected] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const mountedRef = useRef(false);
+  const audioState = useRef({ currentLang, isMuted });
+  audioState.current = { currentLang, isMuted };
 
-  const [speedKmh] = useState(54);
-  const [vehiclePose] = useState<VehiclePose>({
-    latitude: 12.9372,
-    longitude: 77.6953,
-    headingDeg: 220,
-    speedMps: 15.0,
-    horizontalAccuracyM: 1.8,
-  });
-
-  useEffect(() => {
-    setCurrentLang(initialLang);
-  }, [initialLang]);
-
-  useEffect(() => {
-    apiClient.connectWebSocket(
-      {
-        clientId: 'veh_driver_auto_01',
-        corridorId: 'blr_outer_ring_road',
-        currentEdgeId: 'orr_south_kadubeesanahalli_main',
-        upcomingEdgeIds: ['orr_south_bellandur_main'],
-        vehiclePose,
-      },
-      (hazard: Hazard, personalizedAlert?: DriverAlert) => {
-        setHazards((prev) => {
-          const filtered = prev.filter((h) => h.id !== hazard.id);
-          return [hazard, ...filtered];
-        });
-
-        if (personalizedAlert && personalizedAlert.relevanceResult) {
-          triggerAlert(personalizedAlert);
-        }
-      }
-    );
-
-    apiClient.getHazards('blr_outer_ring_road').then(setHazards);
-
-    return () => {
-      apiClient.disconnect();
-      stopCamera();
-    };
-  }, []);
+  useEffect(() => { setCurrentLang(selectedLanguage || 'en'); }, [selectedLanguage]);
 
   const triggerAlert = (alert: DriverAlert) => {
+    const expiresAt = Date.parse(alert.expiry);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return;
     setActiveAlert(alert);
-    setRelayLatencyMs(Math.floor(22 + Math.random() * 8));
-
-    if (!isMuted) {
+    if (!audioState.current.isMuted) {
       audioSynthesizer.playRiskChime(alert.riskLevel);
-      const localized = getLocalizedMessage(currentLang, alert.messageKey as any);
-      if (localized.shortVoicePhrase) {
-        audioSynthesizer.speakLocalVoicePhrase(localized.shortVoicePhrase, currentLang);
-      }
+      const phrase = getLocalizedMessage(audioState.current.currentLang, alert.messageKey as any).shortVoicePhrase;
+      if (phrase) audioSynthesizer.speakLocalVoicePhrase(phrase, audioState.current.currentLang);
     }
-  };
-
-  const speakCurrentStatus = () => {
-    if (!activeAlert) {
-      const msg =
-        currentLang === 'hi'
-          ? 'आगे सड़क साफ है। गति 54 किलोमीटर प्रति घंटा।'
-          : currentLang === 'kn'
-          ? 'ಮುಂದೆ ರಸ್ತೆ ಸ್ಪಷ್ಟವಾಗಿದೆ. ವೇಗ 54 ಕಿಲೋಮೀಟರ್.'
-          : currentLang === 'ta'
-          ? 'சாலை தெளிவாக உள்ளது. வேகம் 54 கிமீ.'
-          : currentLang === 'te'
-          ? 'రోడ్డు స్పష్టంగా ఉంది.'
-          : 'Road ahead is clear. 54 km per hour.';
-      audioSynthesizer.speakLocalVoicePhrase(msg, currentLang);
-    } else {
-      const localized = getLocalizedMessage(currentLang, activeAlert.messageKey as any);
-      if (localized.shortVoicePhrase) {
-        audioSynthesizer.speakLocalVoicePhrase(localized.shortVoicePhrase, currentLang);
-      }
-    }
-  };
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-      setCameraActive(true);
-      startDetectionLoop();
-    } catch {
-      setCameraActive(false);
-      startDetectionLoop();
-    }
-  };
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
-  };
-
-  const startDetectionLoop = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let frame = 0;
-    const render = () => {
-      frame++;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (cameraActive && videoRef.current) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      } else {
-        const bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-        bgGrad.addColorStop(0, '#090D18');
-        bgGrad.addColorStop(1, '#030509');
-        ctx.fillStyle = bgGrad;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.2)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(canvas.width * 0.45, canvas.height * 0.38);
-        ctx.lineTo(canvas.width * 0.05, canvas.height);
-        ctx.moveTo(canvas.width * 0.55, canvas.height * 0.38);
-        ctx.lineTo(canvas.width * 0.95, canvas.height);
-        ctx.stroke();
-
-        ctx.strokeStyle = 'rgba(96, 165, 250, 0.6)';
-        ctx.lineWidth = 3;
-        ctx.setLineDash([18, 14]);
-        ctx.beginPath();
-        ctx.moveTo(canvas.width * 0.5, canvas.height * 0.38);
-        ctx.lineTo(canvas.width * 0.5, canvas.height);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-
-      const pulse = Math.sin(frame * 0.08) * 6;
-      const boxX = canvas.width * 0.38 + pulse;
-      const boxY = canvas.height * 0.62;
-      const boxW = 160;
-      const boxH = 90;
-
-      ctx.strokeStyle = '#EF4444';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(boxX, boxY, boxW, boxH);
-
-      ctx.fillStyle = '#EF4444';
-      ctx.fillRect(boxX, boxY - 24, boxW, 24);
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 12px monospace';
-      ctx.fillText('POTHOLE (94%)', boxX + 12, boxY - 7);
-
-      requestAnimationFrame(render);
-    };
-
-    render();
   };
 
   useEffect(() => {
-    if (driveMode === 'camera') {
-      startCamera();
-    } else {
-      stopCamera();
-      startDetectionLoop();
-    }
-  }, [driveMode]);
+    let mounted = true;
+    mountedRef.current = true;
+    apiClient.connectWebSocket({ clientId: `driver_${Date.now()}`, corridorId: 'blr_outer_ring_road', currentEdgeId: 'orr_south_kadubeesanahalli_main', upcomingEdgeIds: ['orr_south_bellandur_main'], vehiclePose: pose }, (hazard, alert) => {
+      if (!mounted) return;
+      setRelayConnected(true);
+      setHazards((previous) => [hazard, ...previous.filter((item) => item.id !== hazard.id)].slice(0, 20));
+      if (alert?.relevanceResult) triggerAlert(alert);
+    }, undefined, connected => { if (mounted) setRelayConnected(connected); });
+    apiClient.getHazards('blr_outer_ring_road').then((items) => {
+      if (mounted && Array.isArray(items)) setHazards(previous => { const merged = new Map(items.map(item => [item.id, item])); previous.forEach(item => { const snapshot = merged.get(item.id); if (!snapshot || item.revision >= snapshot.revision) merged.set(item.id, item); }); return Array.from(merged.values()).slice(0,20); });
+    }).catch(() => { if (mounted) setStatusMessage('Offline. You can still try the demo.'); });
+    return () => { mounted = false; mountedRef.current = false; apiClient.disconnect(); };
+  }, []);
 
-  const triggerPotholeScenario = async () => {
-    const newObs: Observation = {
-      id: `obs_${Date.now()}`,
-      sourceId: 'veh_lead_KA03',
-      captureTime: new Date().toISOString(),
-      vehiclePose: {
-        latitude: 12.9365,
-        longitude: 77.6948,
-        headingDeg: 220,
-        speedMps: 15.0,
-        horizontalAccuracyM: 1.5,
-      },
-      estimatedHazardLocation: {
-        latitude: 12.9363,
-        longitude: 77.6946,
-        horizontalAccuracyM: 1.2,
-        provenance: 'measured',
-      },
-      perceptionOutput: [
-        {
-          class: 'pothole',
-          confidence: 0.95,
-          bbox: { x: 0.4, y: 0.65, width: 0.25, height: 0.18 },
-          frameTimeMs: 16,
-          depthEstimateM: 0.08,
-          modelVersion: 'LiteRT-v1.4',
-        },
-      ],
-      accelerometerPeakG: 2.3,
+  useEffect(() => {
+    if (!activeAlert) return;
+    const timer = window.setTimeout(() => setActiveAlert(null), Math.max(0, Date.parse(activeAlert.expiry) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [activeAlert]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (view === 'camera') {
+      setCameraError('');
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraError('Camera preview is unavailable in this browser.');
+        return;
+      }
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then((stream) => {
+        if (cancelled) { stream.getTracks().forEach((track) => track.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; void videoRef.current.play().catch(() => {}); }
+        setCameraActive(true);
+      }).catch(() => { if (!cancelled) { setCameraActive(false); setCameraError('Allow camera access to use the preview.'); } });
+    }
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setCameraActive(false);
+    };
+  }, [view]);
+
+  const makeAlert = (kind: 'pothole' | 'animal' | 'curve'): DriverAlert => ({
+    id: `preview_${kind}_${Date.now()}`, hazardId: `preview_${kind}`, hazardRevision: 1, relevanceResult: true,
+    riskLevel: kind === 'curve' ? 'caution' : 'urgent', distanceAheadM: kind === 'pothole' ? 30 : kind === 'animal' ? 42 : 90,
+    timeAheadSec: kind === 'pothole' ? 2 : kind === 'animal' ? 2.8 : 6,
+    messageKey: kind === 'pothole' ? 'hazard.pothole.ahead' : kind === 'animal' ? 'hazard.animal.path_conflict' : 'road.curve.ahead',
+    expiry: new Date(Date.now() + 15000).toISOString(), reasonCodes: ['SIMULATED_SCENARIO'],
+  });
+
+  const triggerPothole = async () => {
+    setIsSending(true);
+    triggerAlert(makeAlert('pothole'));
+    const observation: Observation = {
+      id: `obs_demo_${Date.now()}`, sourceId: 'veh_lead_KA03', captureTime: new Date().toISOString(),
+      vehiclePose: { ...pose, latitude: 12.9365, longitude: 77.6948 },
+      estimatedHazardLocation: { latitude: 12.9363, longitude: 77.6946, horizontalAccuracyM: 1.2, provenance: 'simulated' },
+      perceptionOutput: [{ class: 'pothole', confidence: 0.95, bbox: { x: 0.4, y: 0.65, width: 0.25, height: 0.18 }, frameTimeMs: 16, modelVersion: 'scenario-fixture' }],
       inputMode: 'simulated',
     };
-
-    await apiClient.postObservation(newObs);
-
-    triggerAlert({
-      id: `alert_pothole_${Date.now()}`,
-      hazardId: 'h_pothole_lead',
-      hazardRevision: 1,
-      relevanceResult: true,
-      riskLevel: 'urgent',
-      distanceAheadM: 30,
-      timeAheadSec: 2.0,
-      messageKey: 'hazard.pothole.ahead',
-      expiry: new Date(Date.now() + 15000).toISOString(),
-      reasonCodes: ['POTHOLE_IMPACT_RISK', 'CORROBORATED_BY_LEAD_CAR'],
-    });
+    try {
+      const result = await apiClient.postObservation(observation);
+      if (!mountedRef.current) return;
+      if (result.error) throw new Error(result.error);
+      setStatusMessage('Demo pothole shared.');
+      setRelayConnected(true);
+    } catch { if (mountedRef.current) { setRelayConnected(false); setStatusMessage('Preview played. Sharing is unavailable while offline.'); } }
+    finally { if (mountedRef.current) setIsSending(false); }
   };
 
-  const triggerCattleScenario = () => {
-    triggerAlert({
-      id: `alert_cattle_${Date.now()}`,
-      hazardId: 'h_cattle',
-      hazardRevision: 1,
-      relevanceResult: true,
-      riskLevel: 'urgent',
-      distanceAheadM: 42,
-      timeAheadSec: 2.8,
-      messageKey: 'hazard.animal.path_conflict',
-      expiry: new Date(Date.now() + 15000).toISOString(),
-      reasonCodes: ['CATTLE_ON_ROAD', 'IMMINENT_PATH_CONFLICT'],
-    });
+  const clearAlert = () => { setActiveAlert(null); setStatusMessage('Warning cleared for your vehicle.'); };
+  const speakStatus = () => {
+    if (isMuted) return;
+    const phrase = activeAlert ? getLocalizedMessage(currentLang, activeAlert.messageKey as any).shortVoicePhrase : t('No active warning.');
+    if (phrase) audioSynthesizer.speakLocalVoicePhrase(phrase, activeAlert ? currentLang : 'en');
   };
 
-  const triggerSharpCurveScenario = () => {
-    triggerAlert({
-      id: `alert_curve_${Date.now()}`,
-      hazardId: 'h_curve',
-      hazardRevision: 1,
-      relevanceResult: true,
-      riskLevel: 'caution',
-      distanceAheadM: 90,
-      timeAheadSec: 6.0,
-      messageKey: 'road.curve.ahead',
-      expiry: new Date(Date.now() + 15000).toISOString(),
-      reasonCodes: ['SHARP_RIGHT_CURVE_RADIUS_65M'],
-    });
-  };
-
-  const triggerClearRoad = () => {
-    setActiveAlert(null);
-    audioSynthesizer.playRiskChime('information');
-  };
-
-  let activePictogramType: HazardIconType = 'safe';
-  if (activeAlert) {
-    if (activeAlert.messageKey.includes('pothole')) activePictogramType = 'pothole';
-    else if (activeAlert.messageKey.includes('animal')) activePictogramType = 'cattle';
-    else if (activeAlert.messageKey.includes('pedestrian')) activePictogramType = 'pedestrian';
-    else if (activeAlert.messageKey.includes('curve')) activePictogramType = 'sharp_curve';
-    else if (activeAlert.messageKey.includes('visibility')) activePictogramType = 'fog';
-  }
-
-  const localizedAlert = activeAlert
-    ? getLocalizedMessage(currentLang, activeAlert.messageKey as any)
-    : null;
+  let pictogram: HazardIconType = 'safe';
+  if (activeAlert?.messageKey.includes('pothole')) pictogram = 'pothole';
+  else if (activeAlert?.messageKey.includes('animal')) pictogram = 'cattle';
+  else if (activeAlert?.messageKey.includes('curve')) pictogram = 'sharp_curve';
+  else if (activeAlert?.messageKey.includes('pedestrian')) pictogram = 'pedestrian';
+  else if (activeAlert?.messageKey.includes('visibility')) pictogram = 'fog';
+  else if (activeAlert?.messageKey.includes('incident')) pictogram = 'incident';
+  const isUrgent = activeAlert?.riskLevel === 'urgent';
+  const warningTitle = pictogram === 'pothole' ? t('Pothole ahead') : pictogram === 'cattle' ? t('Animal crossing') : pictogram === 'sharp_curve' ? t('Sharp curve ahead') : pictogram === 'pedestrian' ? t('Pedestrian ahead') : pictogram === 'fog' ? t('Low visibility') : pictogram === 'incident' ? t('Incident ahead') : activeAlert ? t('Road warning') : t('No active warning');
+  const thermalLabels: Record<ThermalMode, string> = { normal: t('Normal'), warm: t('Warm'), hot: t('Hot'), critical: t('Critical') };
+  const selectedFps = thermalState === 'normal' ? 30 : thermalState === 'warm' ? 15 : thermalState === 'hot' ? 8 : 0;
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-5 space-y-5">
-      {/* LANGUAGE SELECTOR */}
-      <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#0D1322] border border-[#1E293B] overflow-x-auto">
-        <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider pl-2 whitespace-nowrap">
-          Voice Locale:
+    <div className="premium-page mx-auto max-w-6xl space-y-6 pb-12">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="eyebrow">{t('DRIVE')}</p>
+          <h1 className="mt-3 text-3xl font-semibold tracking-[-.04em] text-[#17263e] sm:text-5xl">{t('Your road, a little clearer.')}</h1>
+          <p className="mt-3 text-base text-[#67788f]">{t('Try a warning in your language.')}</p>
+        </div>
+        <span className="inline-flex items-center gap-2 rounded-full border border-[#dce5f2] bg-white px-4 py-2 text-sm text-[#67788f]">
+          <Radio size={14} className={relayConnected ? 'text-emerald-600' : 'text-[#67788f]'} />
+          {relayConnected ? t('Connected demo') : t('Offline demo')}
         </span>
-
-        <div className="flex items-center gap-1.5">
-          {[
-            { code: 'hi', label: 'हिन्दी' },
-            { code: 'kn', label: 'ಕನ್ನಡ' },
-            { code: 'ta', label: 'தமிழ்' },
-            { code: 'te', label: 'తెలుగు' },
-            { code: 'mr', label: 'मराठी' },
-            { code: 'bn', label: 'বাংলা' },
-            { code: 'en', label: 'English' },
-          ].map((lang) => (
-            <button
-              key={lang.code}
-              onClick={() => {
-                setCurrentLang(lang.code);
-                audioSynthesizer.speakLocalVoicePhrase(lang.label, lang.code);
-              }}
-              className={`px-3 py-1 rounded-lg font-mono text-xs transition-all whitespace-nowrap ${
-                currentLang === lang.code
-                  ? 'bg-[#4285F4] text-white font-bold shadow-[0_0_12px_rgba(66,133,244,0.5)]'
-                  : 'bg-[#090D16] text-slate-400 hover:text-white border border-[#1E293B]'
-              }`}
-            >
-              {lang.label}
-            </button>
-          ))}
-        </div>
-
-        <button
-          onClick={() => setIsMuted(!isMuted)}
-          className={`px-2.5 py-1 rounded-lg text-xs font-mono flex items-center gap-1 border transition-all ${
-            isMuted
-              ? 'bg-[#EA4335]/10 text-[#EA4335] border-[#EA4335]/30'
-              : 'bg-[#34A853]/10 text-[#34A853] border-[#34A853]/30'
-          }`}
-        >
-          {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-          <span className="hidden sm:inline">{isMuted ? 'Muted' : 'Audio ON'}</span>
-        </button>
       </div>
 
-      {/* COCKPIT DISPLAY CARD */}
-      <div
-        className={`rounded-2xl p-6 border transition-all ${
-          !activeAlert
-            ? 'bg-[#071610] border-[#34A853]/50'
-            : activeAlert.riskLevel === 'urgent'
-            ? 'bg-[#1C080B] border-[#EA4335] alert-luxury-urgent'
-            : 'bg-[#191206] border-[#FBBC05]'
-        }`}
-      >
-        <div className="flex flex-col md:flex-row items-center justify-between gap-6 text-center md:text-left">
-          <div className="flex flex-col sm:flex-row items-center gap-6">
-            <HazardPictogram type={activePictogramType} size="xl" />
-
-            <div>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-black/60 border border-white/10 text-xs font-mono uppercase text-white mb-2">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    !activeAlert ? 'bg-[#34A853]' : 'bg-[#EA4335] animate-ping'
-                  }`}
-                />
-                <span>
-                  {!activeAlert
-                    ? currentLang === 'hi'
-                      ? 'सड़क साफ है'
-                      : 'ROAD CLEAR'
-                    : activeAlert.riskLevel === 'urgent'
-                    ? 'HAZARD WARNING'
-                    : 'CAUTION'}
-                </span>
-              </div>
-
-              <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-                {!activeAlert
-                  ? currentLang === 'hi'
-                    ? 'गति सामान्य बनाए रखें'
-                    : 'Cruising Safely'
-                  : localizedAlert?.text || activeAlert.messageKey}
-              </h2>
-
-              <div className="flex flex-wrap items-center justify-center md:justify-start gap-3 mt-3 font-mono">
-                {activeAlert ? (
-                  <div className="px-3 py-1.5 rounded-xl bg-black/70 border border-[#FBBC05]/40 text-[#FBBC05]">
-                    <span className="text-xs text-slate-400 mr-2">DISTANCE:</span>
-                    <strong className="text-2xl">{activeAlert.distanceAheadM} M</strong>
-                  </div>
-                ) : (
-                  <div className="px-3 py-1.5 rounded-xl bg-black/50 border border-[#34A853]/30 text-[#34A853] text-sm">
-                    Status: Carriageway Clear
-                  </div>
-                )}
-
-                <div className="px-3 py-1.5 rounded-xl bg-black/60 border border-white/10 text-white">
-                  <span className="text-xs text-slate-400 mr-2">SPEED:</span>
-                  <strong className="text-2xl">{speedKmh}</strong> <span className="text-xs text-slate-400">KM/H</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row md:flex-col gap-2.5 w-full md:w-auto">
-            <button
-              onClick={speakCurrentStatus}
-              className="flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#4285F4] hover:bg-[#3367D6] text-white font-bold text-sm shadow-[0_0_15px_rgba(66,133,244,0.4)] transition-all active:scale-95"
-            >
-              <Volume2 className="w-5 h-5 text-white" />
-              <span>Voice Playback</span>
-            </button>
-
-            {activeAlert && (
-              <button
-                onClick={triggerClearRoad}
-                className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-mono border border-white/20 transition-all"
-              >
-                Clear / Passed
-              </button>
-            )}
-          </div>
+      <section className="premium-panel overflow-hidden">
+        <div className="flex items-center gap-3 border-b border-[#dce5f2] px-5 py-4 sm:px-7">
+          <span className="rounded-xl bg-[#eaf1ff] p-2.5 text-[#2563eb]"><Car size={21} /></span>
+          <div><h2 className="font-semibold text-[#17263e]">Bengaluru · Outer Ring Road</h2><p className="mt-1 text-xs text-[#67788f]">{t('Illustrative route')}</p></div>
         </div>
+        <div className="relative h-[290px] overflow-hidden bg-[#eff5ff] sm:h-[350px]">
+          {view === 'route' ? <RouteScene active={Boolean(activeAlert)} urgent={Boolean(isUrgent)} /> : <>
+            <video ref={videoRef} playsInline muted className={`h-full w-full object-cover ${cameraActive ? '' : 'hidden'}`} />
+            {!cameraActive && <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"><Camera size={32} className="text-[#8c9bb3]" /><p className="max-w-sm text-sm text-[#67788f]">{cameraError ? t(cameraError) : t('Opening camera…')}</p></div>}
+            <span className="absolute bottom-4 left-4 rounded-full bg-white/95 px-3 py-1.5 text-xs text-[#67788f]">{t('Camera preview · no detection model')}</span>
+          </>}
+        </div>
+        <div aria-live="polite" className={`flex flex-col gap-4 border-t px-5 py-5 sm:flex-row sm:items-center sm:px-7 ${isUrgent ? 'border-[#f3d2c9] bg-[#fff4ee]' : activeAlert ? 'border-[#f3e3b7] bg-[#fff9e9]' : 'border-[#cfebdf] bg-[#edfaf3]'}`}>
+          <HazardPictogram type={pictogram} size="md" />
+          <div className="flex-1"><p className="text-xs font-medium uppercase tracking-wider text-[#67788f]">{activeAlert ? t('Demo warning') : t('Ready when you are')}</p><h3 className="mt-1 text-xl font-semibold text-[#17263e]">{warningTitle}</h3>{activeAlert && <p className="mt-1 text-sm text-[#67788f]">{t('{distance} m ahead', { distance: activeAlert.distanceAheadM ?? '—' })}</p>}</div>
+          {activeAlert && <button onClick={clearAlert} className="premium-button-secondary self-start sm:self-center"><Check size={17} />{t('Passed hazard')}</button>}
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <button onClick={triggerPothole} disabled={isSending} className="premium-button justify-center py-4 disabled:opacity-60"><Activity size={19} />{isSending ? t('Sharing…') : t('Pothole ahead')}</button>
+        <button onClick={() => { triggerAlert(makeAlert('animal')); setStatusMessage('Animal crossing preview.'); }} className="premium-button-secondary justify-center py-4"><Eye size={19} />{t('Animal crossing')}</button>
+        <button onClick={() => { triggerAlert(makeAlert('curve')); setStatusMessage('Sharp curve preview.'); }} className="premium-button-secondary justify-center py-4"><CornerUpRight size={19} />{t('Sharp curve')}</button>
       </div>
+      <p role="status" className="text-center text-sm text-[#67788f]">{t(statusMessage)}</p>
 
-      {/* TEST ACTION TILES (4 Google Colors) */}
-      <div className="p-4 rounded-2xl bg-[#0D1322] border border-[#1E293B]">
-        <div className="flex items-center justify-between mb-3 text-xs font-mono text-slate-400">
-          <span className="flex items-center gap-2">
-            <span className="font-bold text-slate-200">GOOGLE V2V TEST INJECTION</span>
-            <span className="text-[10px] text-slate-400">· 4-Quadrant Verification</span>
-          </span>
-          <span className="text-[#34A853]">Relay Latency: {relayLatencyMs}ms</span>
+      <details className="premium-panel group">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-medium text-[#67788f] sm:px-7">{t('More options')}<ChevronDown size={17} className="transition-transform group-open:rotate-180" /></summary>
+        <div className="grid gap-6 border-t border-[#dce5f2] p-5 sm:p-7 md:grid-cols-2">
+          <section className="space-y-4">
+            <h3 className="flex items-center gap-2 font-medium text-[#17263e]"><Volume2 size={17} className="text-[#2563eb]" />{t('Audio and language')}</h3>
+            <label htmlFor="driver-language" className="block text-sm text-[#67788f]">{t('Warning language')}</label>
+            <select id="driver-language" value={currentLang} onChange={(event) => setCurrentLang(event.target.value)} className="w-full rounded-xl border border-[#dce5f2] bg-[#f5f8ff] p-3 text-[#17263e]">{languages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}</select>
+            <div className="flex flex-wrap gap-3"><button onClick={speakStatus} disabled={isMuted} className="premium-button-secondary disabled:opacity-40"><Volume2 size={16} />{t('Play message')}</button><button onClick={() => { setIsMuted((value) => !value); if (!isMuted && 'speechSynthesis' in window) window.speechSynthesis.cancel(); }} aria-pressed={isMuted} className="premium-button-secondary">{isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}{isMuted ? t('Unmute') : t('Mute')}</button></div>
+            <p className="text-xs leading-relaxed text-[#67788f]">{t('Audio uses your device’s selected output.')}</p>
+            <button onClick={() => setView((previous) => previous === 'route' ? 'camera' : 'route')} className="premium-button-secondary"><Camera size={16} />{view === 'route' ? t('Open camera preview') : t('Return to route')}</button>
+          </section>
+          <section className="space-y-4">
+            <h3 className="flex items-center gap-2 font-medium text-[#17263e]"><Thermometer size={17} className="text-[#2563eb]" />{t('Thermal demo')}</h3><p className="text-sm text-[#67788f]">{t('Explore the workload policy. No temperature is measured here.')}</p>
+            <div className="grid grid-cols-2 gap-2">{thermalModes.map((mode) => <button key={mode} onClick={() => setThermalState(mode)} aria-pressed={thermalState === mode} className={`rounded-xl border px-3 py-3 text-sm ${thermalState === mode ? 'border-[#9ebefb] bg-[#eaf1ff] text-[#2563eb]' : 'border-[#dce5f2] bg-white text-[#67788f]'}`}>{thermalLabels[mode]}</button>)}</div>
+            <p className="text-sm text-[#67788f]">{selectedFps ? t('Illustrative limit: {fps} fps', { fps: selectedFps }) : t('Illustrative state: perception paused')}</p>
+            <div className="border-t border-[#dce5f2] pt-4"><h3 className="text-sm font-medium text-[#17263e]">{t('Shared observations: {count}', { count: hazards.length })}</h3><div className="mt-2 space-y-2">{hazards.slice(0, 3).map((hazard) => <p key={hazard.id} className="text-sm text-[#67788f]">{hazard.roadReference.roadName}</p>)}{!hazards.length && <p className="text-sm text-[#67788f]">{t('No observations loaded.')}</p>}</div></div>
+          </section>
         </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {/* 1. Google Red: Pothole */}
-          <button
-            onClick={triggerPotholeScenario}
-            className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-[#EA4335]/10 border border-[#EA4335]/40 hover:border-[#EA4335] hover:bg-[#EA4335]/20 text-white transition-all active:scale-95 group"
-          >
-            <HazardPictogram type="pothole" size="md" className="mb-1.5" />
-            <span className="text-sm font-bold text-[#EA4335]">Pothole D40</span>
-            <span className="text-[10px] text-slate-400 font-mono">Google Red · 30m</span>
-          </button>
-
-          {/* 2. Google Yellow: Cattle */}
-          <button
-            onClick={triggerCattleScenario}
-            className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-[#FBBC05]/10 border border-[#FBBC05]/40 hover:border-[#FBBC05] hover:bg-[#FBBC05]/20 text-white transition-all active:scale-95 group"
-          >
-            <HazardPictogram type="cattle" size="md" className="mb-1.5" />
-            <span className="text-sm font-bold text-[#FBBC05]">Cattle Path</span>
-            <span className="text-[10px] text-slate-400 font-mono">Google Yellow · 42m</span>
-          </button>
-
-          {/* 3. Google Blue: Sharp Turn */}
-          <button
-            onClick={triggerSharpCurveScenario}
-            className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-[#4285F4]/10 border border-[#4285F4]/40 hover:border-[#4285F4] hover:bg-[#4285F4]/20 text-white transition-all active:scale-95 group"
-          >
-            <HazardPictogram type="sharp_curve" size="md" className="mb-1.5" />
-            <span className="text-sm font-bold text-[#4285F4]">Sharp Curve</span>
-            <span className="text-[10px] text-slate-400 font-mono">Google Blue · 35 km/h</span>
-          </button>
-
-          {/* 4. Google Green: Clear Road */}
-          <button
-            onClick={triggerClearRoad}
-            className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-[#34A853]/10 border border-[#34A853]/40 hover:border-[#34A853] hover:bg-[#34A853]/20 text-white transition-all active:scale-95 group"
-          >
-            <HazardPictogram type="safe" size="md" className="mb-1.5" />
-            <span className="text-sm font-bold text-[#34A853]">Clear Road</span>
-            <span className="text-[10px] text-slate-400 font-mono">Google Green · Safe</span>
-          </button>
-        </div>
-      </div>
-
-      {/* CAMERA TOGGLE */}
-      <div className="flex items-center justify-between p-3 rounded-xl bg-[#0D1322] border border-[#1E293B] text-xs font-mono">
-        <span className="text-slate-400">Optical Perception Mode</span>
-        <button
-          onClick={() => setDriveMode(driveMode === 'cockpit' ? 'camera' : 'cockpit')}
-          className="px-3 py-1 rounded-lg bg-[#090D16] hover:bg-slate-800 text-slate-200 border border-[#1E293B]"
-        >
-          {driveMode === 'cockpit' ? 'Enable Camera View' : 'Disable Camera View'}
-        </button>
-      </div>
-
-      {driveMode === 'camera' && (
-        <div className="relative rounded-2xl overflow-hidden border border-[#1E293B] bg-black aspect-[16/9]">
-          <video ref={videoRef} playsInline muted className="hidden" />
-          <canvas ref={canvasRef} width={640} height={360} className="w-full h-full object-cover" />
-          <div className="absolute top-3 left-3 bg-black/80 px-2.5 py-1 rounded text-white font-mono text-xs border border-white/20">
-            LiteRT-v1.4 Detector
-          </div>
-        </div>
-      )}
+      </details>
     </div>
   );
+};
+
+const RouteScene = ({ active, urgent }: { active: boolean; urgent: boolean }) => {
+  const { t } = useI18n();
+  return <svg viewBox="0 0 900 350" className="h-full w-full" role="img" aria-label={t('Illustrative route with two vehicles')}>
+    <defs><pattern id="driver-grid" width="46" height="46" patternUnits="userSpaceOnUse"><path d="M46 0H0V46" fill="none" stroke="#dce6f3" strokeWidth=".6" /></pattern></defs>
+    <rect width="900" height="350" fill="#eff5ff" /><rect width="900" height="350" fill="url(#driver-grid)" />
+    <g fill="none" stroke="#dfe8f5" strokeWidth="30"><path d="M-20 58L250 123 500 45 920 112" /><path d="M-30 300L240 225 580 310 930 232" /><path d="M150-50L190 400" /><path d="M730-50L680 400" /></g>
+    <path d="M410-30C380 80 530 100 480 210S430 280 460 390" fill="none" stroke="#c9d8ed" strokeWidth="67" /><path d="M410-30C380 80 530 100 480 210S430 280 460 390" fill="none" stroke="#fff" strokeWidth="54" />
+    <path d="M410-30C380 80 530 100 480 210S430 280 460 390" fill="none" stroke="#8fb1eb" strokeWidth="2" strokeDasharray="8 9" />
+    <circle cx="475" cy="142" r="32" fill="#2563eb" fillOpacity=".06" /><circle cx="475" cy="142" r="20" fill="#2563eb" fillOpacity=".08" />
+    <g transform="translate(465 124)"><rect width="20" height="36" rx="7" fill="#2563eb" /><rect x="4" y="7" width="12" height="8" rx="2" fill="#b5d1ff" /></g>
+    <g transform="translate(441 260)"><rect width="20" height="36" rx="7" fill="#35a77d" /><rect x="4" y="7" width="12" height="8" rx="2" fill="#b8f0d8" /></g>
+    <g fontFamily="inherit" fontSize="14"><text x="518" y="149" fill="#2563eb">{t('Lead vehicle')}</text><text x="488" y="284" fill="#278562">{t('Your vehicle')}</text></g>
+    {active && <g><circle cx="482" cy="208" r="23" fill={urgent ? '#f0a176' : '#e7c262'} fillOpacity=".2" /><circle cx="482" cy="208" r="7" fill={urgent ? '#e98b57' : '#d9af44'} /></g>}
+  </svg>;
 };

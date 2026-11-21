@@ -1,3 +1,12 @@
+import {PhoneLocationMap} from './PhoneLocationMap';
+import type {GPSFix,Telemetry} from '../mobile/telemetry';
+import {readPhoneTelemetry} from '../mobile/phoneReadings';
+import {RoadPhoneSensors} from './RoadPhoneSensors';
+import '../mobile.css';
+import {createPortal} from 'react-dom';
+import QRCode from 'qrcode';
+import { apiClient } from '../services/apiClient';
+import { LiveRelay } from '../live/relay';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Volume2,
@@ -142,7 +151,14 @@ const HAZARD_SPECS: Record<
   side: { ic: '🧍', lv: 0, n: 'Person at roadside', r: 'Near shoulder', quiet: true },
 };
 
+const HAS_ROAD_API = !location.hostname.endsWith('github.io') || Boolean(import.meta.env.VITE_API_ORIGIN);
+
 export const InCarDisplay: React.FC = () => {
+  const [hostedPhone, setHostedPhone] = useState(Boolean(import.meta.env.VITE_PHONE_APP_ORIGIN) || location.hostname.endsWith('github.io'));
+  const [hostedPhoneOrigin, setHostedPhoneOrigin] = useState(import.meta.env.VITE_PHONE_APP_ORIGIN || (location.hostname.endsWith('github.io') ? location.origin + location.pathname : ''));
+  const [phoneOrigin, setPhoneOrigin] = useState('');
+  const [pairQr, setPairQr] = useState('');
+  useEffect(() => { if (!HAS_ROAD_API) return; void apiClient.getConfig().then(config => { if (config.phoneWebOrigin) setPhoneOrigin(config.phoneWebOrigin); }).catch(() => {}); }, []);
   // Vehicle Telemetry
   const [vehicleSpeed, setVehicleSpeed] = useState<number>(90);
   const [roadCurveType, setRoadCurveType] = useState<string>('STRAIGHT');
@@ -159,11 +175,21 @@ export const InCarDisplay: React.FC = () => {
   const [leftViewMode, setLeftViewMode] = useState<'camera' | 'road'>('camera');
 
   // Phone Cam Streams: Direct MediaStream or Base64 Frames
-  const [peerId] = useState<string>(() => `margai-${Math.floor(1000 + Math.random() * 9000)}`);
+  const [peerId,setPeerId] = useState<string>(() => {
+    try { const saved=sessionStorage.getItem('margai.display.id');if(saved&&/^margai-[A-Za-z0-9]{4,8}$/.test(saved))return saved; } catch {}
+    const id=`margai-${Math.floor(1000 + Math.random() * 9000)}`;try{sessionStorage.setItem('margai.display.id',id);}catch{}return id;
+  });
   const [verifiedPeerId, setVerifiedPeerId] = useState<string>('');
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [isWebRtcConnected, setIsWebRtcConnected] = useState<boolean>(false);
   const [phoneCameraB64, setPhoneCameraB64] = useState<string | null>(null);
+  const [videoReady, setVideoReady] = useState(false);
+  const [feedClock, setFeedClock] = useState(Date.now());
+  const lastImageAt = useRef(0), lastVideoAt = useRef(0), lastVideoTime = useRef(-1), phoneInferenceUntil = useRef(0);
+  const packetReceiver = useRef<(data:any)=>void>(()=>{});
+  const [phoneTelemetry, setPhoneTelemetry] = useState<{gps:GPSFix|null;speedKmh:number|null;heading:number|null;gForce:number|null}|null>(null);
+  const [phoneSensors,setPhoneSensors]=useState<Telemetry|null>(null);
+  const [sensorReceivedAt,setSensorReceivedAt]=useState(0);
   const [showPairModal, setShowPairModal] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
@@ -235,47 +261,24 @@ export const InCarDisplay: React.FC = () => {
         setVerifiedPeerId(id);
       });
 
-      // 1. Incoming MediaStream Call (Audio/Video from Phone)
+      // Track playable media separately from an allocated but stalled MediaStream.
       peer.on('call', (call) => {
-        console.log('Incoming call from smartphone...');
-        call.answer();
-        call.on('stream', (remoteStream) => {
-          console.log('Received smartphone camera stream:', remoteStream);
-          setCameraStream(remoteStream);
-          setIsWebRtcConnected(true);
-          setLeftViewMode('camera');
-          setShowPairModal(false); // Auto-close pairing modal!
-          showToast('📱 Smartphone Camera Connected to Infotainment!');
+        let received:MediaStream|null=null; call.answer();
+        call.on('stream', remoteStream => {
+          received=remoteStream;lastVideoAt.current=0;lastVideoTime.current=-1;setVideoReady(false);
+          setCameraStream(remoteStream);setIsWebRtcConnected(true);setLeftViewMode('camera');
+          remoteStream.getVideoTracks().forEach(track=>track.addEventListener('ended',()=>{setCameraStream(current=>current===remoteStream?null:current);setVideoReady(false);},{once:true}));
         });
+        const clear=()=>{setCameraStream(current=>current===received?null:current);setVideoReady(false);};
+        call.on('close',clear);call.on('error',clear);
       });
-
-      // 2. Incoming DataConnection (Base64 frames & real-time telemetry fallback)
-      peer.on('connection', (conn) => {
-        console.log('Incoming data connection from smartphone...');
-        conn.on('data', (data: any) => {
-          if (!data) return;
-          if (data.camera_b64) {
-            setPhoneCameraB64(data.camera_b64);
-            setIsWebRtcConnected(true);
-            setLeftViewMode('camera');
-            setShowPairModal(false); // Auto-close pairing modal!
-          }
-          if (data.speed_kmh !== undefined && data.speed_kmh > 0) {
-            setVehicleSpeed(Math.round(data.speed_kmh));
-          }
-          if (data.road_curve) {
-            setRoadCurveType(data.road_curve);
-          }
-          if (data.z_accel_g !== undefined && data.z_accel_g > 1.8 && !isBumpActive) {
-            triggerBumpEvent(data.z_accel_g);
-          }
-          if (data.hazards !== undefined) {
-            ingestPhoneHazards(data.hazards);
-          }
-        });
+      peer.on('connection',conn=>{
+        conn.on('data',(data:any)=>{packetReceiver.current(data);if(typeof data?.camera_b64==='string'&&conn.open)conn.send({kind:'margai.frame.received',receivedAt:Date.now()});});
+        conn.on('close',()=>{if(Date.now()-lastImageAt.current>3000)setIsWebRtcConnected(false);});
       });
 
       peer.on('error', (err: any) => {
+        if(err.type==='unavailable-id'){const id=`margai-${Math.floor(1000 + Math.random()*9000)}`;try{sessionStorage.setItem('margai.display.id',id);}catch{}setVerifiedPeerId('');setPeerId(id);}
         console.warn('Peer note:', err);
       });
     } catch (e) {
@@ -285,6 +288,15 @@ export const InCarDisplay: React.FC = () => {
     return () => {
       if (peer) peer.destroy();
     };
+  }, [peerId]);
+
+  // LAN relay fallback: the static hosted viewer uses WebRTC without a REST relay.
+  useEffect(() => {
+    if (!HAS_ROAD_API) return;
+    const relay = new LiveRelay();
+    relay.whenOpen(() => relay.send('pair.join', {code:peerId.replace(/^margai-/i,''),role:'car'}));
+    relay.on('infotainment.update', event => packetReceiver.current(event.payload));
+    return () => relay.close();
   }, [peerId]);
 
   // Robustly Attach MediaStream to Video Elements whenever Stream or ViewMode changes
@@ -300,6 +312,16 @@ export const InCarDisplay: React.FC = () => {
       }
     }
   }, [cameraStream, leftViewMode]);
+
+  useEffect(()=>{
+    const interval=setInterval(()=>{
+      const v=remoteVideoRef.current;const now=Date.now();
+      if(v&&v.readyState>=2&&v.videoWidth&&v.currentTime!==lastVideoTime.current){lastVideoTime.current=v.currentTime;lastVideoAt.current=now;setVideoReady(true);}
+      if(now-lastVideoAt.current>4000)setVideoReady(false);
+      if(now-Math.max(lastVideoAt.current,lastImageAt.current)>5000)setIsWebRtcConnected(false);
+      setFeedClock(now);
+    },1000);return()=>clearInterval(interval);
+  },[]);
 
   // Direct Hardware Camera Trigger with Automatic Fallback Cascade
   const startDeviceCamera = async () => {
@@ -346,7 +368,7 @@ export const InCarDisplay: React.FC = () => {
 
     const interval = setInterval(async () => {
       const v = remoteVideoRef.current;
-      if (!v || v.readyState < 2 || (!cameraStream && !phoneCameraB64)) return;
+      if (Date.now()<phoneInferenceUntil.current || !v || v.readyState < 2 || (!cameraStream && !phoneCameraB64)) return;
 
       try {
         const res = await detectHazards(v, analysisCanvasRef.current!);
@@ -364,24 +386,7 @@ export const InCarDisplay: React.FC = () => {
     try {
       bc = new BroadcastChannel('margai_road_telemetry');
       bc.onmessage = (event) => {
-        const msg = event.data;
-        if (!msg) return;
-
-        if (msg.speed_kmh !== undefined && msg.speed_kmh > 0) {
-          setVehicleSpeed(Math.round(msg.speed_kmh));
-        }
-        if (msg.road_curve) {
-          setRoadCurveType(msg.road_curve);
-        }
-        if (msg.z_accel_g !== undefined && msg.z_accel_g > 1.8 && !isBumpActive) {
-          triggerBumpEvent(msg.z_accel_g);
-        }
-        if (msg.camera_b64) {
-          setPhoneCameraB64(msg.camera_b64);
-        }
-        if (msg.hazards !== undefined) {
-          ingestPhoneHazards(msg.hazards);
-        }
+        packetReceiver.current(event.data);
       };
     } catch (e) {}
 
@@ -498,10 +503,12 @@ export const InCarDisplay: React.FC = () => {
       else if (ht.includes('WATER') || ht.includes('FLOOD')) key = 'waterlogging';
       else if (ht.includes('CURVE') || ht.includes('TURN')) key = 'curve';
       else if (ht.includes('POTHOLE')) key = 'pothole';
+      else return;
 
       const estDist = dh.distance_m ? Math.round(dh.distance_m) : 60;
       const spec = HAZARD_SPECS[key] || HAZARD_SPECS.pothole;
-      const conf = dh.confidence ? Math.round(dh.confidence * 100) : 92;
+      const confidence = typeof dh.confidence === 'number' ? dh.confidence : null;
+      const conf = confidence === null ? 0 : Math.round(confidence <= 1 ? confidence * 100 : confidence);
 
       if (dh.geo) {
         setActiveGeo({ lat: dh.geo.lat, lng: dh.geo.lng });
@@ -671,10 +678,15 @@ export const InCarDisplay: React.FC = () => {
   const dashFlowDuration = `${Math.max(0.4, 28 / Math.max(15, vehicleSpeed))}s`;
 
   const activePairId = verifiedPeerId || peerId;
-  const phonePairUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}${window.location.pathname}?mode=smartphone&pair=${activePairId}`
-      : `https://pbalamurali74-hue.github.io/MargAI/?mode=smartphone&pair=${activePairId}`;
+  const phonePairUrl = (() => {
+    try {
+      const url = new URL(hostedPhone ? hostedPhoneOrigin : phoneOrigin || window.location.origin + window.location.pathname);
+      if (hostedPhone && url.protocol !== 'https:') return '';
+      url.search = ''; url.searchParams.set('view','smartphone'); url.searchParams.set('pair',activePairId); return url.href;
+    } catch { return ''; }
+  })();
+
+  useEffect(() => { if (!phonePairUrl) { setPairQr(''); return; } void QRCode.toDataURL(phonePairUrl, {width:180,margin:1}).then(setPairQr).catch(() => setPairQr('')); }, [phonePairUrl]);
 
   const copyPairLink = () => {
     if (navigator.clipboard) {
@@ -684,10 +696,33 @@ export const InCarDisplay: React.FC = () => {
     }
   };
 
-  const hasLiveCamera = !!cameraStream || !!phoneCameraB64;
+  packetReceiver.current=(data:any)=>{
+    if(!data||typeof data!=='object')return;
+    if(typeof data.camera_b64==='string'&&data.camera_b64.startsWith('data:image/')){
+      lastImageAt.current=Date.now();setPhoneCameraB64(data.camera_b64);setIsWebRtcConnected(true);setLeftViewMode('camera');setShowPairModal(false);
+    }
+    if(data.model_status)phoneInferenceUntil.current=Date.now()+4000;
+    if(data.telemetry){setPhoneSensors(readPhoneTelemetry(data.telemetry));setSensorReceivedAt(Date.now());}
+    if(Array.isArray(data.hazards))ingestPhoneHazards(data.hazards);
+    if(typeof data.speed_kmh==='number'&&data.speed_kmh>=0)setVehicleSpeed(Math.round(data.speed_kmh));
+    if(Object.prototype.hasOwnProperty.call(data,'gps')){
+      const gps=data.gps&&typeof data.gps.latitude==='number'&&typeof data.gps.longitude==='number'?data.gps:null;
+      setPhoneTelemetry({gps,speedKmh:typeof data.speed_kmh==='number'?data.speed_kmh:null,heading:typeof data.heading==='number'?data.heading:null,gForce:typeof data.g_force==='number'?data.g_force:null});
+      if(gps)setActiveGeo({lat:gps.latitude,lng:gps.longitude});
+      if(typeof data.g_force==='number')setZAccelG(data.g_force);
+    }
+  };
+  const hasFreshImage=!!phoneCameraB64&&feedClock-lastImageAt.current<5000;
+  const hasLiveCamera=videoReady||hasFreshImage;
+
 
   return (
     <div className="w-full max-w-7xl mx-auto p-2 sm:p-4 font-['Plus_Jakarta_Sans',sans-serif]">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3 px-3 py-3 border rounded bg-white text-slate-700 text-xs" role="status">
+        <span>Website display ID: <strong className="font-mono">{activePairId}</strong></span>
+        <span>{hasLiveCamera?'Receiving live phone view':'Waiting for phone camera — enter this ID in the phone’s Car display field and tap Connect.'}</span>
+        <button onClick={()=>setShowPairModal(true)} className="px-3 py-2 border rounded">Pair phone / QR</button>
+      </div>
       {/* SCENARIO & CAMERA SOURCE CONTROLS BAR */}
       <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2 bg-[#0d1322] border border-[#1e293b] p-2.5 px-3.5 rounded-2xl text-xs font-mono">
         {/* Left View Mode Toggle: Camera Feed vs 3D Road */}
@@ -701,7 +736,7 @@ export const InCarDisplay: React.FC = () => {
             }`}
           >
             <Camera className="w-3.5 h-3.5" />
-            <span>📹 Phone Camera View (Slide 10.3)</span>
+            <span>Live camera</span>
           </button>
 
           <button
@@ -713,13 +748,13 @@ export const InCarDisplay: React.FC = () => {
             }`}
           >
             <Car className="w-3.5 h-3.5" />
-            <span>🛣️ 3D Vector Road View (Slide 10.2)</span>
+            <span>Road view</span>
           </button>
         </div>
 
         {/* Hazard Testing Simulator Bar */}
         <div className="flex items-center gap-1 bg-[#080c14] border border-[#1e293b] rounded-xl p-1 text-[11px]">
-          <span className="text-slate-400 font-bold px-1.5 hidden lg:inline">🧪 Sight Trigger:</span>
+          <span className="text-slate-400 font-bold px-1.5 hidden lg:inline">Demo scenarios:</span>
           <button
             onClick={() => applyScenario('urgent')}
             className={`px-2 py-1 rounded-lg font-bold transition-all ${
@@ -780,7 +815,7 @@ export const InCarDisplay: React.FC = () => {
             title="Use current device camera directly"
           >
             <Camera className="w-3.5 h-3.5" />
-            <span>{cameraStream ? 'Camera Active' : 'Enable Device Camera'}</span>
+            <span>{videoReady ? 'Camera active' : 'Enable Device Camera'}</span>
           </button>
 
           {/* QR Pairing for Phone Camera Stream */}
@@ -804,17 +839,18 @@ export const InCarDisplay: React.FC = () => {
         </div>
       </div>
 
+      <RoadPhoneSensors readings={phoneSensors} receivedAt={sensorReceivedAt} now={feedClock}/>
       {/* AUTOMOTIVE TOUCHSCREEN BEZEL (16:9 DISPLAY) */}
       <div className="relative w-full aspect-[16/9] min-h-[440px] max-h-[640px] bg-[#0c0f17] border-[12px] sm:border-[16px] border-[#181c26] rounded-[28px] sm:rounded-[36px] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col select-none ring-1 ring-white/10">
         
         {/* TOP STATUS BAR */}
         <div className="w-full h-8 px-4 sm:px-6 bg-[#0a0d14] border-b border-white/[0.06] flex items-center justify-between text-slate-400 text-xs font-mono z-30">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-300 text-[11px]">Dspec - Send</span>
+            <span className="font-semibold text-slate-300 text-[11px]">MargAI / Drive showcase</span>
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
             <span className="text-[10px] text-slate-400 hidden sm:inline">
               {isWebRtcConnected
-                ? 'Smartphone Camera: Streaming (WebRTC HD)'
+                ? (hasLiveCamera?'Phone camera · live':'Phone connected · waiting for video')
                 : cameraStream
                 ? 'Local Dashcam Feed Active'
                 : phoneCameraB64
@@ -826,11 +862,11 @@ export const InCarDisplay: React.FC = () => {
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5 text-[11px]">
               <Wifi className="w-3.5 h-3.5 text-slate-300" />
-              <span className="text-slate-300 font-bold">5G</span>
+              <span className="text-slate-300 font-bold">{hasLiveCamera?'Live feed':'Waiting'}</span>
             </div>
             <div className="flex items-center gap-1 text-[11px]">
               <Battery className="w-3.5 h-3.5 text-slate-300" />
-              <span>98%</span>
+              <span>Phone sensors</span>
             </div>
             <div className="font-bold text-white tracking-wide text-xs">
               {clockStr}
@@ -853,7 +889,7 @@ export const InCarDisplay: React.FC = () => {
               </div>
               <div>
                 <div className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-none font-mono drop-shadow-md">
-                  {vehicleSpeed}
+                  {phoneTelemetry?.speedKmh==null?'—':Math.round(phoneTelemetry.speedKmh)}
                 </div>
                 <div className="text-[11px] font-mono text-slate-300 uppercase tracking-widest mt-0.5 drop-shadow">
                   km/h
@@ -879,20 +915,22 @@ export const InCarDisplay: React.FC = () => {
                   onLoadedMetadata={(e) => {
                     (e.target as HTMLVideoElement).play().catch(() => {});
                   }}
-                  className={`w-full h-full object-cover ${cameraStream ? 'block' : 'hidden'}`}
+                  onLoadedData={()=>{lastVideoAt.current=Date.now();setVideoReady(true);setShowPairModal(false);}}
+                  onError={()=>setVideoReady(false)}
+                  className={`absolute inset-0 w-full h-full object-contain ${cameraStream ? 'block' : 'hidden'}`}
                 />
 
                 {/* 2. Base64 Frame Stream from Smartphone (DataConnection or BroadcastChannel fallback) */}
-                {phoneCameraB64 && !cameraStream && (
+                {hasFreshImage && (
                   <img
                     src={phoneCameraB64}
-                    alt="Smartphone Stream"
-                    className="w-full h-full object-cover"
+                    alt="Live phone camera frame"
+                    className="absolute inset-0 w-full h-full object-contain"
                   />
                 )}
 
                 {/* 3. Standby Overlay with 1-Click Buttons when no live feed connected */}
-                {!cameraStream && !phoneCameraB64 && (
+                {!hasLiveCamera && (
                   <div className="relative w-full h-full">
                     <video
                       src="./road_sample.mp4"
@@ -914,7 +952,7 @@ export const InCarDisplay: React.FC = () => {
                             onClick={startDeviceCamera}
                             className="w-full py-2.5 bg-[#22c55e] hover:bg-emerald-600 text-black font-extrabold rounded-xl shadow-lg transition-all"
                           >
-                            🎥 Enable This Device's Camera
+                            Enable this device’s camera
                           </button>
                           <button
                             onClick={() => setShowPairModal(true)}
@@ -989,7 +1027,7 @@ export const InCarDisplay: React.FC = () => {
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
                     <span>
                       {isWebRtcConnected
-                        ? 'Phone Cam (WebRTC HD)'
+                        ? (hasLiveCamera?'Phone camera · live':'Waiting for phone frames')
                         : cameraStream
                         ? 'Device Cam (Live)'
                         : phoneCameraB64
@@ -1120,10 +1158,10 @@ export const InCarDisplay: React.FC = () => {
               ) : (
                 <div className="flex flex-col items-center justify-center px-5 py-2 rounded-xl bg-[#092314]/95 border border-[#22c55e] text-center shadow-2xl backdrop-blur-md">
                   <div className="font-extrabold text-sm sm:text-base text-[#22c55e] tracking-wider uppercase">
-                    NO HAZARDS AHEAD
+                    NO CURRENT DETECTIONS
                   </div>
                   <div className="text-[11px] font-mono text-emerald-300">
-                    Geofenced Corridor Clear · All Lanes Safe
+                    No detections in the current frame
                   </div>
                 </div>
               )}
@@ -1220,7 +1258,7 @@ export const InCarDisplay: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-[#22c55e]" />
                     <span className="text-xs text-white font-medium">
-                      NO HAZARDS IN SIGHT · Geofenced Corridor Clear (ORR Bangalore)
+                      No observations in this view
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-emerald-400">0 Hazards Ahead</span>
@@ -1232,51 +1270,23 @@ export const InCarDisplay: React.FC = () => {
             <div className="px-4 z-10 flex items-center justify-between">
               <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-[#141924]/90 border border-white/10 text-white text-xs font-semibold backdrop-blur-md">
                 <span className="text-lg text-[#38bdf8] font-bold">↱</span>
-                <span>Upcoming Tamil Nadu</span>
+                <span>{phoneTelemetry?.gps?`${phoneTelemetry.gps.latitude.toFixed(5)}, ${phoneTelemetry.gps.longitude.toFixed(5)}`:'Waiting for phone GPS'}</span>
               </div>
 
               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-[10px] font-mono text-emerald-300">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                <span>GPS High Acc</span>
+                <span>{phoneTelemetry?.gps?`GPS ±${Math.round(phoneTelemetry.gps.accuracy)} m`:'GPS not received'}</span>
               </div>
             </div>
 
-            {/* DARK VECTOR ROAD MAP */}
-            <div className="relative flex-1 w-full h-full overflow-hidden">
-              <svg viewBox="0 0 600 360" className="absolute inset-0 w-full h-full">
-                <rect width="600" height="360" fill="#0d111a" />
-                <path d="M40 0 L40 360 M120 0 L120 360 M200 0 L200 360 M320 0 L320 360 M440 0 L440 360 M520 0 L520 360" stroke="#1a2233" strokeWidth="2" />
-                <path d="M0 60 L600 60 M0 140 L600 140 M0 220 L600 220 M0 300 L600 300" stroke="#1a2233" strokeWidth="2" />
-                <path d="M60 360 Q180 260 220 180 T420 80 L580 40" stroke="#242e42" strokeWidth="18" fill="none" strokeLinecap="round" />
-                <path d="M20 180 L220 180 L360 360" stroke="#242e42" strokeWidth="14" fill="none" strokeLinecap="round" />
-                <path d="M180 340 L210 240 L240 180 Q260 140 320 120 L440 90 L520 70" stroke="#0284c7" strokeWidth="10" fill="none" strokeLinecap="round" opacity="0.5" />
-                <path d="M180 340 L210 240 L240 180 Q260 140 320 120 L440 90 L520 70" stroke="#38bdf8" strokeWidth="6" fill="none" strokeLinecap="round" />
-
-                {topHazard && !isClearedState && (
-                  <g transform="translate(240, 180)">
-                    <circle r="16" fill="#ef4444" opacity="0.3" className="animate-ping" />
-                    <circle r="10" fill="#ef4444" stroke="#ffffff" strokeWidth="2" />
-                    <text y="4" textAnchor="middle" fontSize="9" fontWeight="bold" fill="#ffffff">
-                      !
-                    </text>
-                  </g>
-                )}
-
-                <g transform="translate(195, 290) rotate(-15)">
-                  <circle r="18" fill="#38bdf8" opacity="0.3" className="animate-pulse" />
-                  <circle r="10" fill="#0284c7" stroke="#ffffff" strokeWidth="2" />
-                  <path d="M0 -6 L5 4 L0 2 L-5 4 Z" fill="#ffffff" />
-                </g>
-              </svg>
-
-              <div className="absolute bottom-3 left-4 bg-[#131924]/90 border border-white/10 px-3 py-1 rounded-lg text-[10px] font-mono text-slate-300">
-                Upcoming route
-              </div>
+            {/* Actual phone coordinates drive the Google map; no illustrative route is substituted. */}
+            <div className="relative flex-1 w-full overflow-auto road-live-map">
+              <PhoneLocationMap fix={phoneSensors?.gps??phoneTelemetry?.gps??null} heading={phoneSensors?.gps?.heading??phoneSensors?.heading??phoneTelemetry?.heading??null} stale={sensorReceivedAt?feedClock-sensorReceivedAt>5000||feedClock-(phoneSensors?.gps?.timestamp??0)>15000:!phoneTelemetry?.gps||feedClock-phoneTelemetry.gps.timestamp>15000}/>
 
               {/* Picture-in-Picture Phone Camera Feed in Corner */}
               {leftViewMode === 'road' && (
                 <div className="absolute right-3 bottom-3 w-40 sm:w-48 aspect-video rounded-xl overflow-hidden border border-white/20 shadow-2xl z-20 bg-black">
-                  {cameraStream ? (
+                  {videoReady && cameraStream ? (
                     <video
                       ref={pipVideoRef}
                       playsInline
@@ -1284,7 +1294,7 @@ export const InCarDisplay: React.FC = () => {
                       autoPlay
                       className="w-full h-full object-cover"
                     />
-                  ) : phoneCameraB64 ? (
+                  ) : hasFreshImage ? (
                     <img
                       src={phoneCameraB64}
                       alt="Phone Cam"
@@ -1373,15 +1383,17 @@ export const InCarDisplay: React.FC = () => {
         )}
 
         {/* QR CODE & WEBRTC PAIRING MODAL */}
-        {showPairModal && (
+        {showPairModal && createPortal(
           <div
             onClick={(e) => {
               if (e.target === e.currentTarget) setShowPairModal(false);
             }}
-            className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 cursor-pointer"
+            className="fixed inset-0 z-[1000] bg-black/85 backdrop-blur-md flex items-start sm:items-center justify-center overflow-y-auto p-4 cursor-pointer"
           >
             <div
               onClick={(e) => e.stopPropagation()}
+              role="dialog" aria-modal="true" aria-labelledby="phone-pair-title"
+              style={{maxHeight:'calc(100dvh - 32px)',overflowY:'auto'}}
               className="bg-[#0f1422] border border-white/10 rounded-2xl p-6 max-w-sm w-full text-center relative shadow-2xl font-mono cursor-default"
             >
               <button
@@ -1394,20 +1406,26 @@ export const InCarDisplay: React.FC = () => {
               </button>
 
               <Smartphone className="w-10 h-10 text-[#38bdf8] mx-auto mb-2" />
-              <h3 className="text-lg font-bold text-white">Stream Phone Camera</h3>
+              <h3 id="phone-pair-title" className="text-lg font-bold text-white">Stream Phone Camera</h3>
               <p className="text-xs text-slate-300 mt-1 mb-3 font-sans">
                 Scan with your phone to stream live road vision into this Infotainment display.
               </p>
 
+              <div className="flex gap-2 mb-3" role="group" aria-label="Phone connection method">
+                <button className={`flex-1 border px-2 py-2 text-xs rounded ${!hostedPhone ? 'bg-slate-600 text-white' : 'text-slate-300'}`} onClick={() => setHostedPhone(false)} aria-pressed={!hostedPhone}>Local Wi-Fi</button>
+                <button className={`flex-1 border px-2 py-2 text-xs rounded ${hostedPhone ? 'bg-slate-600 text-white' : 'text-slate-300'}`} onClick={() => setHostedPhone(true)} aria-pressed={hostedPhone}>Hosted phone page</button>
+              </div>
+              <p className="text-xs text-slate-300 mb-3">{hostedPhone ? 'Uses the deployed phone website and WebRTC. Your local API is not exposed.' : 'Phone and laptop must be reachable on the same Wi-Fi. Local HTTPS needs the demo certificate.'}</p>
+              <a className="block text-xs text-cyan-300 break-all mb-3" href={phonePairUrl} target="_blank" rel="noreferrer">{phonePairUrl}</a>
+              {hostedPhone && <label className="block text-xs text-left text-slate-300 mb-3">Updated phone website URL<input type="url" value={hostedPhoneOrigin} onChange={event=>setHostedPhoneOrigin(event.target.value)} placeholder="https://your-site/MargAI/" className="block w-full mt-2 p-2 rounded bg-slate-800 text-white"/></label>}
+              {hostedPhone && !phonePairUrl && <p className="text-xs text-amber-200 mb-3">Enter the HTTPS address of the deployed, updated phone app.</p>}
               {/* QR Code */}
               <div className="bg-white p-2.5 rounded-xl inline-block shadow-inner mb-3">
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
-                    phonePairUrl
-                  )}`}
+                {pairQr && <img
+                  src={pairQr}
                   alt="QR Code"
                   className="w-40 h-40"
-                />
+                />}
               </div>
 
               {/* Room Code Badge */}
@@ -1420,6 +1438,7 @@ export const InCarDisplay: React.FC = () => {
               <button
                 type="button"
                 onClick={copyPairLink}
+                disabled={!phonePairUrl}
                 className="w-full py-2 bg-[#1e293b] hover:bg-slate-700 text-slate-200 border border-slate-600 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all mb-2 shadow"
               >
                 {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
@@ -1445,7 +1464,7 @@ export const InCarDisplay: React.FC = () => {
                 ✕ Close Window
               </button>
             </div>
-          </div>
+          </div>, document.body
         )}
       </div>
     </div>

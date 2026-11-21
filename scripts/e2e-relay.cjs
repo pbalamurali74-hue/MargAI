@@ -1,0 +1,20 @@
+const WebSocket=require('ws');
+const env=(eventName,payload)=>JSON.stringify({schemaVersion:'1.0',messageId:'m'+Math.random(),eventName,sentAt:new Date().toISOString(),inputMode:'simulated',payload});
+const mk=(name,pose,cur,up)=>new Promise(r=>{const ws=new WebSocket('ws://localhost:8080/v1/relay');const got=[];ws.on('message',d=>{const e=JSON.parse(d);got.push(e.eventName+(e.payload.personalizedAlert?':alert='+e.payload.personalizedAlert.riskLevel+'@'+e.payload.personalizedAlert.distanceAheadM:''));});
+ws.on('open',()=>{ws.send(env('subscription.replace',{clientId:name,corridorId:'blr_outer_ring_road',currentEdgeId:cur,upcomingEdgeIds:up,vehiclePose:pose}));r({ws,got,name});});});
+(async()=>{
+ const base={speedMps:14,horizontalAccuracyM:2};
+ const lead=await mk('lead',{latitude:12.9328,longitude:77.6914,headingDeg:225,...base},'orr_south_kadubeesanahalli_main',['orr_south_bellandur_main']);
+ const trail=await mk('trail',{latitude:12.9335,longitude:77.6918,headingDeg:225,...base},'orr_south_kadubeesanahalli_main',['orr_south_bellandur_main']);
+ const opp=await mk('opp',{latitude:12.9250,longitude:77.6810,headingDeg:45,...base},'orr_north_bellandur_main',[]);
+ const svc=await mk('svc',{latitude:12.9290,longitude:77.6880,headingDeg:225,...base},'orr_south_bellandur_service',[]);
+ const obs=(id)=>({id,sourceId:'veh_lead_KA03',captureTime:new Date().toISOString(),vehiclePose:{latitude:12.9318,longitude:77.6905,headingDeg:225,speedMps:14,horizontalAccuracyM:2},estimatedHazardLocation:{latitude:12.9310,longitude:77.6895,horizontalAccuracyM:1.2,provenance:'simulated'},perceptionOutput:[{class:'pothole',confidence:.94,bbox:{x:.4,y:.6,width:.2,height:.15},frameTimeMs:16,modelVersion:'sim'}],inputMode:'simulated'});
+ await new Promise(r=>setTimeout(r,300));
+ lead.ws.send(env('observation.submit',obs('o1')));
+ await new Promise(r=>setTimeout(r,300));
+ lead.ws.send(env('observation.submit',obs('o2')));
+ await new Promise(r=>setTimeout(r,500));
+ for(const c of [lead,trail,opp,svc])console.log(c.name,c.got.join(' | '));
+ const hz=await (await fetch('http://localhost:8080/v1/hazards?corridorId=blr_outer_ring_road')).json();
+ console.log(hz.map(h=>[h.id,h.type,h.roadReference.edgeId,h.revision,h.corroboratingSourcesCount,h.verificationState].join(',')));
+ process.exit(0)})();

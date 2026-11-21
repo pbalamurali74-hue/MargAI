@@ -173,6 +173,14 @@ export interface EventEnvelope<T = unknown> {
   schemaVersion: string;
   messageId: string;
   eventName:
+    | 'watch.join'
+    | 'watch.snapshot'
+    | 'vehicle.update'
+    | 'vehicle.gone'
+    | 'pair.join'
+    | 'pair.status'
+    | 'infotainment.push'
+    | 'infotainment.update'
     | 'observation.submit'
     | 'hazard.upsert'
     | 'hazard.expire'

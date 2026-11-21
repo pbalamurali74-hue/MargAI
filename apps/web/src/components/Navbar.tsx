@@ -1,194 +1,26 @@
-import React from 'react';
-import { SUPPORTED_LANGUAGES } from '@margai/localization';
-import {
-  ShieldAlert,
-  Car,
-  FileCheck2,
-  Cpu,
-  Globe2,
-  Radio,
-  SlidersHorizontal,
-  Presentation,
-  Smartphone,
-} from 'lucide-react';
-
-export type TabType = 'command-center' | 'in-car' | 'smartphone' | 'driver' | 'deck' | 'civic' | 'google-stack' | 'public';
-
-interface NavbarProps {
-  currentTab: TabType;
-  onSelectTab: (tab: TabType) => void;
-  selectedLanguage: string;
-  onSelectLanguage: (lang: string) => void;
-  isBackendConnected: boolean;
-}
-
-export const Navbar: React.FC<NavbarProps> = ({
-  currentTab,
-  onSelectTab,
-  selectedLanguage,
-  onSelectLanguage,
-  isBackendConnected,
-}) => {
-  return (
-    <header className="sticky top-0 z-50 bg-[#07090F] border-b border-[#1E293B]">
-      {/* Google 4-Color Signature Gradient Strip */}
-      <div className="h-[3px] w-full bg-gradient-to-r from-[#4285F4] via-[#EA4335] via-[#FBBC05] to-[#34A853]" />
-
-      <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3 px-4 lg:px-8 py-2.5">
-        {/* Brand */}
-        <div className="flex items-center gap-3">
-          <div
-            className="flex items-center gap-2.5 cursor-pointer group"
-            onClick={() => onSelectTab('command-center')}
-          >
-            {/* Google 4-Color Glyph Icon */}
-            <div className="grid grid-cols-2 gap-0.5 w-7 h-7 p-1 rounded-lg bg-[#090D16] border border-[#1E293B] group-hover:border-[#4285F4] transition-all">
-              <div className="bg-[#4285F4] rounded-tl-sm"></div>
-              <div className="bg-[#EA4335] rounded-tr-sm"></div>
-              <div className="bg-[#FBBC05] rounded-bl-sm"></div>
-              <div className="bg-[#34A853] rounded-br-sm"></div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-base font-extrabold text-white tracking-tight">MargAI</span>
-              <span className="text-[10px] font-mono text-slate-300 border border-[#1E293B] px-1.5 py-0.5 rounded bg-[#090D16]">
-                Google Buildathon '26
-              </span>
-            </div>
-          </div>
-
-          <div className="hidden lg:flex items-center gap-2 pl-3 border-l border-[#1E293B] text-[11px] font-mono text-slate-400">
-            <span className="text-[#4285F4] font-bold">Google DeepMind</span>
-            <span>|</span>
-            <span className="text-[#EA4335] font-bold">Google Cloud</span>
-          </div>
-        </div>
-
-        {/* Navigation Tabs with Google Palette Accents */}
-        <nav className="flex items-center gap-1 bg-[#090D16] p-1 rounded-xl border border-[#1E293B] text-xs font-mono">
-          <button
-            onClick={() => onSelectTab('command-center')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'command-center'
-                ? 'bg-[#4285F4]/15 text-[#4285F4] border border-[#4285F4]/40 font-bold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span>3-Pane HUD</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('in-car')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'in-car'
-                ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/60 font-bold shadow-lg shadow-cyan-500/20'
-                : 'text-slate-300 hover:text-white bg-[#1E293B]/40 border border-[#1E293B]'
-            }`}
-          >
-            <Car className="w-3.5 h-3.5 text-cyan-400" />
-            <span>🚗 In-Car HUD</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('smartphone')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'smartphone'
-                ? 'bg-[#EA4335]/20 text-[#EA4335] border border-[#EA4335]/60 font-bold shadow-lg shadow-[#EA4335]/20'
-                : 'text-slate-300 hover:text-white bg-[#1E293B]/40 border border-[#1E293B]'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5 text-[#EA4335] animate-pulse" />
-            <span>📱 Smartphone Cam</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('driver')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'driver'
-                ? 'bg-[#FBBC05]/15 text-[#FBBC05] border border-[#FBBC05]/40 font-bold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Car className="w-3.5 h-3.5" />
-            <span>Driver View</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('deck')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'deck'
-                ? 'bg-[#EA4335]/15 text-[#EA4335] border border-[#EA4335]/40 font-bold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Presentation className="w-3.5 h-3.5" />
-            <span>Buildathon Deck</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('civic')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'civic'
-                ? 'bg-[#34A853]/15 text-[#34A853] border border-[#34A853]/40 font-bold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <FileCheck2 className="w-3.5 h-3.5" />
-            <span>Civic Cases</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('google-stack')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'google-stack'
-                ? 'bg-[#4285F4]/15 text-[#4285F4] border border-[#4285F4]/40 font-bold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Cpu className="w-3.5 h-3.5" />
-            <span>Cloud Stack</span>
-          </button>
-
-          <button
-            onClick={() => onSelectTab('public')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-              currentTab === 'public'
-                ? 'bg-slate-800 text-white border border-slate-700'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <span>Overview</span>
-          </button>
-        </nav>
-
-        {/* Right side: Language & Health */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 bg-[#090D16] border border-[#1E293B] px-2.5 py-1 rounded-lg text-xs font-mono">
-            <Globe2 className="w-3 h-3 text-[#4285F4]" />
-            <select
-              value={selectedLanguage}
-              onChange={(e) => onSelectLanguage(e.target.value)}
-              className="bg-transparent text-slate-200 outline-none cursor-pointer text-xs"
-            >
-              {SUPPORTED_LANGUAGES.map((lang) => (
-                <option key={lang.code} value={lang.code} className="bg-[#090D16] text-slate-200">
-                  {lang.nativeName}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-[#090D16] border border-[#1E293B] font-mono text-slate-400">
-            <Radio
-              className={`w-3 h-3 ${isBackendConnected ? 'text-[#34A853]' : 'text-[#FBBC05]'}`}
-            />
-            <span className="hidden sm:inline text-[11px]">
-              {isBackendConnected ? 'Relay Active' : 'Offline'}
-            </span>
-          </div>
-        </div>
-      </div>
-    </header>
-  );
+import React, { useEffect, useState } from 'react';
+import { ArrowUpRight, ChevronDown, Globe2, Menu, X } from 'lucide-react';
+import { UI_LANGUAGES, useI18n } from '../i18n';
+export type TabType = 'journey' | 'live' | 'app' | 'car' | 'command-center' | 'in-car' | 'smartphone' | 'driver' | 'deck' | 'civic' | 'google-stack' | 'public';
+export const VIEWS: {id:TabType;label:string}[] = [
+  {id:'public',label:'Overview'},{id:'in-car',label:'Road showcase'},{id:'smartphone',label:'Live camera'},{id:'journey',label:'Drive demo'},{id:'civic',label:'Road reports'},
+  {id:'live',label:'Road network'},{id:'app',label:'Driver app'},{id:'car',label:'Car display'},{id:'command-center',label:'Drive studio'},
+  {id:'driver',label:'Scenarios'},{id:'google-stack',label:'System status'},{id:'deck',label:'Our story'},
+];
+export const BrandMark=({compact=false}:{compact?:boolean})=><span className="brand-lockup"><span className="brand-symbol" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M6 25 13 7h6l7 18h-6l-4-11-4 11H6Z" fill="currentColor"/><path d="M16 22v7" stroke="currentColor" strokeWidth="2" strokeDasharray="2 2"/></svg></span>{!compact&&<span className="brand-wordmark">marg<span>ai</span></span>}</span>;
+interface NavbarProps {currentTab:TabType;onSelectTab:(tab:TabType)=>void;selectedLanguage:string;onSelectLanguage:(language:string)=>void;isBackendConnected:boolean;}
+export const Navbar:React.FC<NavbarProps>=({currentTab,onSelectTab,selectedLanguage,onSelectLanguage,isBackendConnected})=>{
+  const {t}=useI18n();
+  const [menuOpen,setMenuOpen]=useState(false);
+  const go=(view:TabType)=>{onSelectTab(view);setMenuOpen(false);};
+  useEffect(()=>{const escape=(event:KeyboardEvent)=>{if(event.key==='Escape')setMenuOpen(false);};window.addEventListener('keydown',escape);return()=>window.removeEventListener('keydown',escape);},[]);
+  return <header className="site-header"><div className="header-inner">
+    <button className="brand-button" aria-label={t('MargAI home')} onClick={()=>go('public')}><BrandMark/></button>
+    <nav className="desktop-nav" aria-label={t('Main navigation')}>{VIEWS.slice(0,5).map(view=><button key={view.id} onClick={()=>go(view.id)} aria-current={currentTab===view.id?'page':undefined} className={`nav-link ${currentTab===view.id?'is-active':''}`}>{t(view.label)}</button>)}</nav>
+    <div className="header-actions"><button className={`network-status ${isBackendConnected?'connected':''}`} onClick={()=>go('google-stack')} title={t('System status')}><i/>{isBackendConnected?t('Network online'):location.hostname.endsWith('github.io')&&!import.meta.env.VITE_API_ORIGIN?t('On-device mode'):t('API offline')}</button>
+    <label className="language-control"><Globe2 size={15}/><select aria-label={t('Website language')} value={selectedLanguage} onChange={event=>onSelectLanguage(event.target.value)}>{UI_LANGUAGES.map(language=><option key={language.code} value={language.code}>{language.nativeName}</option>)}</select><ChevronDown size={12}/></label>
+    <button className="nav-drive" onClick={()=>go('app')}>{t('Start driving')}<ArrowUpRight size={16}/></button>
+    <button className="mobile-menu-button" aria-label={t(menuOpen?'Close navigation':'Open navigation')} aria-controls="mobile-navigation" aria-expanded={menuOpen} onClick={()=>setMenuOpen(!menuOpen)}>{menuOpen?<X size={22}/>:<Menu size={22}/>}</button></div></div>
+    {menuOpen&&<nav id="mobile-navigation" className="mobile-navigation" aria-label={t('Main navigation')}>{[...VIEWS.slice(0,5),VIEWS[10]].map(view=><button key={view.id} onClick={()=>go(view.id)} aria-current={currentTab===view.id?'page':undefined}>{t(view.label)}<ArrowUpRight size={16}/></button>)}</nav>}
+  </header>;
 };

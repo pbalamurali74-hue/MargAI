@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/dist
+.env
+.env.local
+**/.env
+**/.env.local
+**/__pycache__
+.sites-runtime
+.openai
+tmp
+*.log

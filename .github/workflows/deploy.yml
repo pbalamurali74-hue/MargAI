@@ -31,13 +31,15 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build packages and web app
+        env:
+          VITE_PHONE_APP_ORIGIN: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
         run: |
-          npm run build -w packages/contracts || true
-          npm run build -w packages/localization || true
-          npm run build -w apps/web
+          npm run build:packages
+          npm run build:web
           cp apps/web/dist/index.html apps/web/dist/404.html
 
       - name: Setup Pages

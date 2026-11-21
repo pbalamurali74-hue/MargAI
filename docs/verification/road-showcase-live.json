@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-21",
+  "environment": "Local Chrome, Vite localhost:5173",
+  "fixture": "Synthetic canvas camera with explicitly injected GPS and IMU data; not physical Android hardware",
+  "checks": {
+    "peerDataChannel": "PASS: connected and received margai.frame.received acknowledgement",
+    "nativeVideo": "PASS: readyState 4, 640px video width",
+    "jpegFallback": "PASS: decoded 640px image visible in camera viewport",
+    "sensorTransport": "PASS: GPS 13.03/80.18, stationary 0 km/h, 1 g, acceleration 0/1/2 m/s2, gyro 0/2/0 deg/s, compass 45 degrees rendered",
+    "map": "PASS: live location rendered inside right Road showcase pane using explicitly labeled OpenStreetMap fallback",
+    "staleness": "PASS: paused/disconnected fixture becomes Waiting for fresh phone data; old readings labeled stale",
+    "persistentRoom": "PASS: display ID margai-7763 survived viewport-triggered reload",
+    "desktop1440x1000": "PASS: four-column sensor grid and side-by-side camera/map; no horizontal overflow",
+    "mobile390x844": "PASS: two-column sensor grid; no horizontal overflow",
+    "googleMapsAuthorization": "NOT PERFORMED: no browser API key configured, as requested",
+    "physicalAndroidToWebsite": "NOT VERIFIED: user confirmed phone camera works, but reported blank receiver before latest fixes"
+  },
+  "automated": {
+    "vitest": "31/31 passed",
+    "typescript": "passed",
+    "monorepoBuild": "passed",
+    "apiIntegration": "passed: health, hazards, cases, input validation, watcher snapshot, phone relay car, delivery acknowledgement, camera frame payload, room isolation"
+  }
+}

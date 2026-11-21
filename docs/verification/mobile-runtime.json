@@ -1,0 +1,58 @@
+{
+  "contract": "../DESIGN_CONTRACT.md; ../PHONE_RUNTIME.md. Phone-specific verification uses controlled camera/sensor fixtures, not physical Android hardware.",
+  "targetViewports": [
+    "390x844",
+    "1440x1000"
+  ],
+  "accessibility": {
+    "status": "pass",
+    "evidence": "Camera, sensor retry, pairing and map controls have text labels; error/status regions announce results. Keyboard Tab reached enabled controls with the global visible focus ring. No audio or motion is required to use controls."
+  },
+  "responsive": {
+    "status": "pass",
+    "evidence": "Rendered phone at 390x844 without horizontal document overflow; desktop permission-state capture at 1440x1000. Camera overlays matched the source-frame coordinates. All sensor values wrap within the layout."
+  },
+  "contentStates": {
+    "loading": {
+      "status": "pass",
+      "evidence": "Triggered location retry with a pending device callback; Requesting permission remained visible while the camera and available model continued running."
+    },
+    "empty": {
+      "status": "pass",
+      "evidence": "Production-path camera with a blank synthetic frame showed No detections in the current frame after both real models loaded."
+    },
+    "error": {
+      "status": "pass",
+      "evidence": "Injected camera NotAllowedError and GPS denial; specific permission guidance appeared, no coordinates or acceleration were fabricated."
+    },
+    "partial": {
+      "status": "pass",
+      "evidence": "Injected a worker constructor failure in the production /MargAI/ preview: pothole model Needs attention, object model Model ready, camera readyState 4. Restoring Worker and Retry models recovered both models."
+    },
+    "success": {
+      "status": "pass",
+      "evidence": "Real model inference on a road-image synthetic stream produced two pothole boxes and one pedestrian box. Injected GPS and IMU readings appeared with timestamps, zero speed, 1 g and measured rotation. Stop ended all test camera tracks and cleared sensor readings."
+    },
+    "permission": {
+      "status": "pass",
+      "evidence": "Camera/GPS/motion denial tested in browser and unit tests; UI displayed Permission denied, recovery actions and absent readings."
+    }
+  },
+  "renderedEvidence": [
+    {
+      "viewport": "390x844",
+      "artifact": "mobile-camera-390x844.jpg",
+      "observation": "Real on-device model inference on a repository road photo streamed through a synthetic camera. GPS and IMU data are explicit injected verification fixtures, not Android hardware readings."
+    },
+    {
+      "viewport": "1440x1000",
+      "artifact": "mobile-permissions-1440x1000.jpg",
+      "observation": "Desktop rendering of the permission-denied state with no fabricated GPS or IMU values."
+    }
+  ],
+  "limits": [
+    "Physical Android camera/GPS/motion permissions and accuracy remain unverified until the new build is deployed and opened on the device.",
+    "Google Maps authorization remains untested because the user requested integration without a browser key. OpenStreetMap fallback was rendered.",
+    "Model photo smoke tests are not an accuracy benchmark."
+  ]
+}

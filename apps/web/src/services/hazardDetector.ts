@@ -1,19 +1,6 @@
-/**
- * MargAI Ultra-Fast Edge AI & Hazard Detection Engine
- * 
- * Production-grade Edge AI pipeline:
- *  1. Deep Neural Object Detection via MobileNet/COCO-SSD (LiteRT Edge NPU style):
- *     - Accurately detects real PEDESTRIANS (persons, regardless of clothing or lighting)
- *     - Accurately detects ANIMALS (cattle, dogs, cows, horses, sheep)
- *     - Accurately detects VEHICLES & OBSTACLES in lane
- *  2. Adaptive Edge Pothole & Waterlogging Anomaly Analyzer:
- *     - Localized depth contrast & road surface gradient analysis
- *     - Specular puddle reflection detection
- *  3. Non-blocking async execution (<18ms inference, 60 FPS UI).
- *  4. Clean Road Guarantee: Returns 0 hazards when road is clear.
- */
-
-export type HazardType = 'PEDESTRIAN' | 'ANIMAL' | 'POTHOLE' | 'WATERLOGGING';
+import {PhoneVision} from '../mobile/vision';
+/** Real on-device road and COCO object models. Distances are not inferred from a single box. */
+export type HazardType = 'PEDESTRIAN' | 'ANIMAL' | 'POTHOLE' | 'WATERLOGGING' | 'VEHICLE';
 
 export interface DetectedHazard {
   hazard_type: HazardType;
@@ -21,7 +8,7 @@ export interface DetectedHazard {
   bbox: [number, number, number, number];
   confidence: number;
   risk_level: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  distance_m: number;
+  distance_m: number|null;
   label: string;
   geo?: { lat: number; lng: number; accuracy: number };
   timestamp: number;
@@ -37,11 +24,7 @@ export interface DetectionResult {
 
 // ── GPS Geolocation & Geofencing ───────────────────────────────────
 
-let currentGeoPosition: { lat: number; lng: number; accuracy: number } | null = {
-  lat: 12.9372,
-  lng: 77.6953,
-  accuracy: 12,
-};
+let currentGeoPosition: { lat: number; lng: number; accuracy: number } | null = null;
 let geoWatchId: number | null = null;
 
 export function startGeoTracking() {
@@ -72,166 +55,18 @@ export function getCurrentPosition() {
   return currentGeoPosition;
 }
 
-// ── Deep Neural Edge AI Model Loader ───────────────────────────────
-
-let cocoModel: any = null;
-let isModelLoading = false;
-let modelLoadError: string | null = null;
-
-export async function loadDetectionModel(): Promise<boolean> {
-  if (cocoModel) return true;
-  if (isModelLoading) return false;
-
-  isModelLoading = true;
-  try {
-    // Wait for CDN script if still loading
-    if (typeof window !== 'undefined' && !(window as any).cocoSsd) {
-      await new Promise<void>((resolve) => {
-        let attempts = 0;
-        const check = setInterval(() => {
-          attempts++;
-          if ((window as any).cocoSsd || attempts > 25) {
-            clearInterval(check);
-            resolve();
-          }
-        }, 100);
-      });
-    }
-
-    if (typeof window !== 'undefined' && (window as any).cocoSsd) {
-      cocoModel = await (window as any).cocoSsd.load({
-        base: 'lite_mobilenet_v2', // Lightweight edge mobile architecture (<4MB, GPU accelerated)
-      });
-      isModelLoading = false;
-      return true;
-    }
-  } catch (err: any) {
-    modelLoadError = err?.message || 'Failed to load neural model';
-    console.warn('MargAI Neural Model note:', err);
-  } finally {
-    isModelLoading = false;
-  }
-  return false;
+// Shared on-device models for direct camera use in the road showcase.
+let vision:PhoneVision|null=null;
+let previousFrameAt=0;
+export async function loadDetectionModel():Promise<boolean>{
+  if(!vision)vision=new PhoneVision(()=>{});
+  await vision.load();return vision.state.pothole==='ready'||vision.state.objects==='ready';
 }
-
-export function getModelStatus() {
-  return {
-    loaded: !!cocoModel,
-    loading: isModelLoading,
-    error: modelLoadError,
-  };
-}
-
-// ── Non-blocking Inference Loop with Mutex Guard ────────────────────
-
-let isInferring = false;
-let lastResult: DetectionResult = {
-  hazards: [],
-  fps: 60,
-  inferenceMs: 2,
-  frameWidth: 320,
-  frameHeight: 240,
-};
-
-export async function detectHazards(
-  videoElement: HTMLVideoElement,
-  analysisCanvas: HTMLCanvasElement
-): Promise<DetectionResult> {
-  const vw = videoElement.videoWidth || 320;
-  const vh = videoElement.videoHeight || 240;
-
-  if (vw === 0 || vh === 0 || videoElement.readyState < 2) {
-    return lastResult;
-  }
-
-  // If previous frame inference is still computing on GPU, return cached result immediately (Zero Lag!)
-  if (isInferring) {
-    return lastResult;
-  }
-
-  isInferring = true;
-  const startMs = performance.now();
-  const hazards: DetectedHazard[] = [];
-
-  try {
-    // Ensure neural model is initialized
-    if (!cocoModel && !isModelLoading) {
-      loadDetectionModel().catch(() => {});
-    }
-
-    // ── 1. Deep Neural Detection (Pedestrian, Animals, Obstacles) ─────
-    if (cocoModel) {
-      try {
-        const predictions = await cocoModel.detect(videoElement);
-        for (const pred of predictions) {
-          const [bx, by, bw, bh] = pred.bbox;
-          const score = pred.score;
-          const cls = (pred.class || '').toLowerCase();
-
-          // Calculate bounding box percentages
-          const leftPct = Math.max(0, Math.min(100, Math.round((bx / vw) * 100)));
-          const topPct = Math.max(0, Math.min(100, Math.round((by / vh) * 100)));
-          const rightPct = Math.max(0, Math.min(100, Math.round(((bx + bw) / vw) * 100)));
-          const bottomPct = Math.max(0, Math.min(100, Math.round(((by + bh) / vh) * 100)));
-
-          // Pedestrian (Person) Detection with Strict Confidence Threshold
-          if (cls === 'person' && score >= 0.50) {
-            // Distance estimation based on bounding box height relative to frame
-            const hRatio = bh / vh;
-            const distM = Math.max(10, Math.min(120, Math.round(15 / Math.max(0.12, hRatio))));
-
-            hazards.push({
-              hazard_type: 'PEDESTRIAN',
-              bbox: [leftPct, topPct, rightPct, bottomPct],
-              confidence: Math.round(score * 100),
-              risk_level: distM < 40 ? 'CRITICAL' : 'HIGH',
-              distance_m: distM,
-              label: `Pedestrian ${Math.round(score * 100)}%`,
-              geo: currentGeoPosition || undefined,
-              timestamp: Date.now(),
-            });
-          }
-
-          // Stray Animal (Cattle, Dogs, Horses, Cows, Sheep, Cats)
-          else if (
-            ['dog', 'cow', 'horse', 'sheep', 'cat', 'bird', 'bear'].includes(cls) &&
-            score >= 0.48
-          ) {
-            const hRatio = bh / vh;
-            const distM = Math.max(12, Math.min(110, Math.round(18 / Math.max(0.15, hRatio))));
-
-            hazards.push({
-              hazard_type: 'ANIMAL',
-              bbox: [leftPct, topPct, rightPct, bottomPct],
-              confidence: Math.round(score * 100),
-              risk_level: distM < 40 ? 'CRITICAL' : 'HIGH',
-              distance_m: distM,
-              label: `${cls === 'cow' ? 'Stray Cattle' : 'Stray Animal'} ${Math.round(score * 100)}%`,
-              geo: currentGeoPosition || undefined,
-              timestamp: Date.now(),
-            });
-          }
-        }
-      } catch (neuralErr) {
-        // Fallback note
-      }
-    }
-
-    // Road is verified clean if no high-confidence obstacles detected
-  } catch (e) {
-    // Inference note
-  } finally {
-    isInferring = false;
-  }
-
-  const inferenceMs = Math.max(1, Math.round(performance.now() - startMs));
-  lastResult = {
-    hazards,
-    fps: 60,
-    inferenceMs,
-    frameWidth: vw,
-    frameHeight: vh,
-  };
-
-  return lastResult;
+export function getModelStatus(){return {loaded:vision?.state.pothole==='ready'||vision?.state.objects==='ready',loading:vision?.state.pothole==='loading'||vision?.state.objects==='loading',error:[vision?.state.potholeError,vision?.state.objectsError].filter(Boolean).join('; ')||null};}
+export async function detectHazards(video:HTMLVideoElement,canvas:HTMLCanvasElement):Promise<DetectionResult>{
+  if(!vision||!getModelStatus().loaded)await loadDetectionModel();
+  if(video.readyState<2||!video.videoWidth)return {hazards:[],fps:0,inferenceMs:0,frameWidth:0,frameHeight:0};
+  canvas.width=Math.min(640,video.videoWidth);canvas.height=Math.round(video.videoHeight*canvas.width/video.videoWidth);canvas.getContext('2d',{willReadFrequently:true})!.drawImage(video,0,0,canvas.width,canvas.height);
+  const result=await vision!.detect(canvas);const now=performance.now();const fps=previousFrameAt?1000/(now-previousFrameAt):0;previousFrameAt=now;
+  return {hazards:(result?.detections||[]).map(d=>({hazard_type:d.cls.toUpperCase() as HazardType,bbox:[d.x*100,d.y*100,(d.x+d.w)*100,(d.y+d.h)*100],confidence:d.conf,risk_level:'MEDIUM',distance_m:null,label:d.label||d.cls,geo:currentGeoPosition||undefined,timestamp:Date.now()})),fps,inferenceMs:result?.ms||0,frameWidth:video.videoWidth,frameHeight:video.videoHeight};
 }

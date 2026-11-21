@@ -92,6 +92,8 @@ export const EventEnvelopeSchema = z.object({
   schemaVersion: z.string(),
   messageId: z.string(),
   eventName: z.enum([
+    'watch.join', 'watch.snapshot', 'vehicle.update', 'vehicle.gone',
+    'pair.join', 'pair.status', 'infotainment.push', 'infotainment.update',
     'observation.submit',
     'hazard.upsert',
     'hazard.expire',

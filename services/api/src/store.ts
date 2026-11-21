@@ -13,11 +13,26 @@ export interface LatencyMetricRecord {
   durationMs: number;
 }
 
+const HAZARD_TTL_MS: Record<string, number> = {
+  pothole: 86400000 * 3, animal: 10 * 60000, pedestrian: 2 * 60000, low_visibility: 30 * 60000,
+  suspected_incident: 45 * 60000, confirmed_incident: 90 * 60000, collision_risk: 90000, sharp_curve: 86400000 * 30,
+};
+export function classToHazardType(c: string): Hazard['type'] {
+  if (/(fog|haze|visibility)/.test(c)) return 'low_visibility';
+  if (/(accident|incident|crash)/.test(c)) return 'suspected_incident';
+  if (/collision/.test(c)) return 'collision_risk';
+  if (/(animal|cow|cattle|dog|horse|sheep|buffalo|goat)/.test(c)) return 'animal';
+  if (/(pedestrian|person)/.test(c)) return 'pedestrian';
+  return 'pothole';
+}
+
 export class MargAIStorageEngine {
   private hazards: Map<string, Hazard> = new Map();
   private observations: Map<string, Observation> = new Map();
   private cases: Map<string, CivicCase> = new Map();
   private latencyMetrics: LatencyMetricRecord[] = [];
+  private hazardSources: Map<string, Set<string>> = new Map();
+  private simulatedHazardIds: Set<string> = new Set();
   public isFirestoreLive: boolean = false;
 
   constructor() {
@@ -53,6 +68,7 @@ export class MargAIStorageEngine {
       corroboratingSourcesCount: 3,
       evidenceIds: ['ev_kad_1', 'ev_kad_2', 'ev_kad_3'],
       metadata: {
+        sourceKind: 'seeded_demo',
         severityScore: 8.4,
         depthEstimateCm: 7.5,
         accelerometerPeakG: 2.1,
@@ -118,7 +134,7 @@ export class MargAIStorageEngine {
       evidenceCount: 1,
       corroboratingSourcesCount: 1,
       evidenceIds: ['ev_cattle_1'],
-      metadata: { animalClass: 'cow', movementSpeedMps: 1.1 },
+      metadata: { sourceKind: 'seeded_demo', animalClass: 'cow', movementSpeedMps: 1.1 },
     };
     this.hazards.set(cattleHazard.id, cattleHazard);
   }
@@ -169,11 +185,16 @@ export class MargAIStorageEngine {
       provenance: 'estimated',
     };
 
-    // Find nearest matching hazard within 20 meters
+    const primaryClass = (obs.perceptionOutput[0]?.class || 'pothole').toLowerCase();
+    const hazardType = classToHazardType(primaryClass);
+    const mergeRadiusM = hazardType === 'low_visibility' ? 400 : hazardType === 'suspected_incident' ? 60 : hazardType === 'pothole' ? 20 : 35;
+
+    // Find nearest matching hazard of the same type within the merge radius
     let matchedHazard: Hazard | null = null;
     for (const h of this.hazards.values()) {
+      if (h.type !== hazardType || h.verificationState === 'expired') continue;
       const dist = haversineDistanceM(obsLoc, h.location);
-      if (dist <= 20) {
+      if (dist <= mergeRadiusM) {
         matchedHazard = h;
         break;
       }
@@ -183,13 +204,18 @@ export class MargAIStorageEngine {
       // Cluster with existing hazard
       matchedHazard.revision += 1;
       matchedHazard.lastSeen = obs.captureTime;
+      matchedHazard.expiry = new Date(Date.now() + HAZARD_TTL_MS[hazardType]).toISOString();
       matchedHazard.evidenceCount += 1;
       if (obs.evidenceRef) {
         matchedHazard.evidenceIds.push(obs.evidenceRef);
       }
 
       // Check independent corroboration
-      const isIndependent = !matchedHazard.evidenceIds.includes(obs.sourceId);
+      // Independent = a vehicle source this hazard has not heard from before.
+      const sources = this.hazardSources.get(matchedHazard.id) ?? new Set<string>();
+      const isIndependent = !sources.has(obs.sourceId);
+      sources.add(obs.sourceId);
+      this.hazardSources.set(matchedHazard.id, sources);
       if (isIndependent) {
         matchedHazard.corroboratingSourcesCount += 1;
         if (matchedHazard.corroboratingSourcesCount >= 2 && matchedHazard.verificationState === 'unverified') {
@@ -222,13 +248,6 @@ export class MargAIStorageEngine {
     }
 
     // Create new hazard from observation
-    const primaryClass = obs.perceptionOutput[0]?.class || 'pothole';
-    const hazardType = primaryClass.includes('animal')
-      ? 'animal'
-      : primaryClass.includes('pedestrian')
-      ? 'pedestrian'
-      : 'pothole';
-
     const newHazard: Hazard = {
       id: `h_${uuidv4().slice(0, 8)}`,
       type: hazardType,
@@ -237,35 +256,38 @@ export class MargAIStorageEngine {
         latitude: obsLoc.latitude,
         longitude: obsLoc.longitude,
         horizontalAccuracyM: obsLoc.horizontalAccuracyM,
-        provenance: 'measured',
+        provenance: obsLoc.provenance,
       },
-      roadReference: {
-        corridorId: 'blr_outer_ring_road',
-        edgeId: 'orr_south_bellandur_main',
-        roadName: 'Bengaluru Outer Ring Road Corridor',
-        carriageway: 'forward',
-      },
-      directionApplicability: 'same_direction',
-      confidence: obs.perceptionOutput[0]?.confidence || 0.88,
+      roadReference: this.matchRoadReference(obsLoc.latitude, obsLoc.longitude, obs.vehiclePose.headingDeg),
+      directionApplicability: hazardType === 'low_visibility' || hazardType === 'suspected_incident' ? 'both_directions' : 'same_direction',
+      confidence: obs.perceptionOutput[0]?.confidence ?? 0.88,
       verificationState: 'unverified',
       firstSeen: obs.captureTime,
       lastSeen: obs.captureTime,
-      expiry: new Date(Date.now() + (hazardType === 'animal' ? 600000 : 86400000 * 3)).toISOString(),
+      expiry: new Date(Date.now() + HAZARD_TTL_MS[hazardType]).toISOString(),
       evidenceCount: 1,
       corroboratingSourcesCount: 1,
       evidenceIds: obs.evidenceRef ? [obs.evidenceRef] : [],
       metadata: {
-        peakG: obs.accelerometerPeakG || 1.8,
+        peakG: obs.accelerometerPeakG ?? null,
+        inputMode: obs.inputMode,
+        sourceKind: obs.inputMode === 'live' ? 'live_phone' : obs.inputMode,
+        detector: obs.perceptionOutput[0]?.modelVersion ?? null,
       },
     };
 
     this.hazards.set(newHazard.id, newHazard);
+    this.hazardSources.set(newHazard.id, new Set([obs.sourceId]));
+    if (obs.inputMode === 'simulated') this.simulatedHazardIds.add(newHazard.id);
+
+    // Only persistent road damage becomes a civic case; short-lived road users and weather do not.
+    if (hazardType !== 'pothole') return { hazard: newHazard, isNew: true };
 
     // Create new civic case
     const newCase: CivicCase = {
       id: `case_${uuidv4().slice(0, 8)}`,
       hazardId: newHazard.id,
-      jurisdiction: 'Bruhat Bengaluru Mahanagara Palike (BBMP) - Mahadevapura Ward 85',
+      jurisdiction: newHazard.roadReference.corridorId === 'blr_outer_ring_road' ? 'Bruhat Bengaluru Mahanagara Palike (BBMP) - Mahadevapura Ward 85' : 'Local road authority (to be identified from location)',
       status: 'detected',
       roadName: newHazard.roadReference.roadName,
       location: newHazard.location,
@@ -278,10 +300,9 @@ export class MargAIStorageEngine {
       ],
       firstObservedAt: newHazard.firstSeen,
       lastObservedAt: newHazard.lastSeen,
-      authority: {
-        name: 'Bruhat Bengaluru Mahanagara Palike (BBMP)',
-        portalId: 'BBMP-Sahaaya-Roads',
-      },
+      authority: newHazard.roadReference.corridorId === 'blr_outer_ring_road'
+        ? { name: 'Bruhat Bengaluru Mahanagara Palike (BBMP)', portalId: 'BBMP-Sahaaya-Roads' }
+        : { name: 'Local road authority (unassigned)', portalId: 'UNASSIGNED' },
       auditTrail: [
         {
           timestamp: new Date().toISOString(),
@@ -295,6 +316,44 @@ export class MargAIStorageEngine {
     this.cases.set(newCase.id, newCase);
 
     return { hazard: newHazard, isNew: true, caseUpdated: newCase };
+  }
+
+  /** Corridor matcher. On the surveyed ORR corridor heading picks the carriageway and latitude the segment;
+   *  everywhere else the 'open_road' corridor uses 45-degree heading buckets as a directed-edge approximation. */
+  public matchRoadReference(latitude: number, longitude: number, headingDeg: number) {
+    const onOrr = latitude > 12.9 && latitude < 12.96 && longitude > 77.6 && longitude < 77.71;
+    if (!onOrr) {
+      const bucket = Math.round((((headingDeg % 360) + 360) % 360) / 45) % 8;
+      return { corridorId: 'open_road', edgeId: `open_h${bucket}`, roadName: 'Road ahead (heading ' + bucket * 45 + '°)', carriageway: 'forward' as const };
+    }
+    const southbound = headingDeg >= 90 && headingDeg <= 270;
+    if (!southbound) {
+      return { corridorId: 'blr_outer_ring_road', edgeId: 'orr_north_bellandur_main', roadName: 'ORR Northbound Main Carriageway', carriageway: 'reverse' as const, speedLimitKmh: 60 };
+    }
+    const edgeId = latitude > 12.9482 ? 'orr_south_marathahalli_main' : latitude > 12.93 ? 'orr_south_kadubeesanahalli_main' : 'orr_south_bellandur_main';
+    return { corridorId: 'blr_outer_ring_road', edgeId, roadName: 'Bengaluru Outer Ring Road (Southbound)', carriageway: 'forward' as const, speedLimitKmh: 60 };
+  }
+
+  /** Hazards whose expiry has passed since the last sweep (shared records are kept, clients are told). */
+  public sweepExpired(): Hazard[] {
+    const now = new Date().toISOString();
+    const out: Hazard[] = [];
+    for (const h of this.hazards.values()) {
+      if (h.expiry < now && h.verificationState !== 'expired') { h.verificationState = 'expired'; out.push(h); }
+    }
+    return out;
+  }
+
+  /** Removes hazards and cases created by simulated observations so a demo can be replayed. */
+  public resetSimulated(): number {
+    let removed = 0;
+    for (const id of this.simulatedHazardIds) {
+      if (this.hazards.delete(id)) removed++;
+      this.hazardSources.delete(id);
+      for (const [caseId, c] of this.cases.entries()) if (c.hazardId === id) this.cases.delete(caseId);
+    }
+    this.simulatedHazardIds.clear();
+    return removed;
   }
 
   public recordLatency(stage: LatencyMetricRecord['stage'], durationMs: number) {

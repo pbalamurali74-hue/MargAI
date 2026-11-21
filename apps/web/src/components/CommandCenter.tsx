@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Camera,
@@ -29,9 +30,8 @@ import {
   CivicCase,
 } from '@margai/contracts';
 import { audioSynthesizer, getLocalizedMessage } from '@margai/localization';
-import { apiClient } from '../services/apiClient';
+import { apiClient, serviceUrl, serviceSocketUrl } from '../services/apiClient';
 import { AudioWaveform } from './AudioWaveform';
-import { BeforeAfterSlider } from './BeforeAfterSlider';
 
 interface CommandCenterProps {
   selectedLanguage: string;
@@ -40,6 +40,7 @@ interface CommandCenterProps {
 export const CommandCenter: React.FC<CommandCenterProps> = ({
   selectedLanguage,
 }) => {
+  const { t } = useI18n();
   const [nightHudMode, setNightHudMode] = useState<boolean>(false);
   const [activeAlert, setActiveAlert] = useState<DriverAlert | null>(null);
   const [hazards, setHazards] = useState<Hazard[]>([]);
@@ -47,7 +48,11 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
   const [selectedCase, setSelectedCase] = useState<CivicCase | null>(null);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(false);
   const [v2vActive, setV2vActive] = useState<boolean>(false);
-  const [relayLatencyMs, setRelayLatencyMs] = useState<number>(24);
+  const [relayConnected, setRelayConnected] = useState(false);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [caseBusy, setCaseBusy] = useState(false);
+  const animationRef = useRef<number | null>(null);
+  const phoneUrl = `${window.location.origin}/?mode=smartphone`;
 
   // Sensor Telemetry
   const [zAccelG, setZAccelG] = useState<number>(1.02);
@@ -75,6 +80,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
   });
 
   useEffect(() => {
+    if (videoSource === 'smartphone') return;
     const sensorInterval = setInterval(() => {
       const baseG = activeAlert ? 2.14 : 1.02;
       const jitter = (Math.random() - 0.5) * 0.08;
@@ -85,13 +91,13 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
     }, 200);
 
     return () => clearInterval(sensorInterval);
-  }, [activeAlert]);
+  }, [activeAlert, videoSource]);
 
   // Smartphone Stream Status & Frame Polling
   useEffect(() => {
     const statusInterval = setInterval(async () => {
       try {
-        const res = await fetch('/api/smartphone/status');
+        const res = await fetch(serviceUrl('/api/smartphone/status', true));
         if (res.ok) {
           const data = await res.json();
           setPhoneConnected(data.connected);
@@ -100,8 +106,11 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
           if (data.connected && videoSource === 'simulation') {
             setVideoSource('smartphone');
           }
+        } else {
+          setPhoneConnected(false);
         }
       } catch (e) {
+        setPhoneConnected(false);
         // AI server offline
       }
     }, 1500);
@@ -118,7 +127,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
 
     mirrorInterval = setInterval(async () => {
       try {
-        const res = await fetch('/api/smartphone/latest_frame');
+        const res = await fetch(serviceUrl('/api/smartphone/latest_frame', true));
         if (res.ok) {
           const data = await res.json();
           if (data.frame_base64 && canvasRef.current) {
@@ -169,11 +178,12 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
       }
     );
 
-    apiClient.getHazards('blr_outer_ring_road').then(setHazards);
+    apiClient.getHealth().then((health) => setRelayConnected(health.status === 'ok')).catch(() => setRelayConnected(false));
+    apiClient.getHazards('blr_outer_ring_road').then(setHazards).catch(() => setHazards([]));
     apiClient.getCases().then((cList) => {
       setCases(cList);
       if (cList.length > 0) setSelectedCase(cList[0]);
-    });
+    }).catch(() => setCases([]));
 
     return () => {
       apiClient.disconnect();
@@ -183,7 +193,6 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
 
   const triggerAlert = (alert: DriverAlert) => {
     setActiveAlert(alert);
-    setRelayLatencyMs(Math.floor(22 + Math.random() * 8));
     setV2vActive(true);
     setIsAudioActive(true);
     setTimeout(() => setV2vActive(false), 3000);
@@ -208,10 +217,9 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
         videoRef.current.play();
       }
       setCameraActive(true);
-      startDetectionLoop();
     } catch {
       setCameraActive(false);
-      startDetectionLoop();
+      setActionNotice('Camera access was not available. Allow camera permission in a secure context, or choose the demo scenario.');
     }
   };
 
@@ -238,13 +246,13 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       } else {
         const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-        grad.addColorStop(0, '#090D16');
-        grad.addColorStop(0.5, '#0C1222');
-        grad.addColorStop(1, '#05070E');
+        grad.addColorStop(0, '#eef4ff');
+        grad.addColorStop(0.5, '#e5eefb');
+        grad.addColorStop(1, '#d2def1');
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        ctx.strokeStyle = '#1E293B';
+        ctx.strokeStyle = '#a6bbda';
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(canvas.width * 0.45, canvas.height * 0.38);
@@ -263,7 +271,12 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
         ctx.setLineDash([]);
       }
 
-      // Corner brackets reticle
+      if (videoSource !== 'simulation') {
+        animationRef.current = requestAnimationFrame(render);
+        return;
+      }
+
+      // Clearly labelled illustrative detection in simulation mode only
       const pulse = Math.sin(frame * 0.08) * 5;
       const bx = canvas.width * 0.36 + pulse;
       const by = canvas.height * 0.58;
@@ -296,17 +309,20 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
       ctx.fillRect(bx, by - 22, bw, 22);
       ctx.fillStyle = '#FFFFFF';
       ctx.font = 'bold 11px monospace';
-      ctx.fillText('CLASS: D40 (0.94)', bx + 8, by - 6);
+      ctx.fillText(t('Demo pothole'), bx + 8, by - 6);
 
-      requestAnimationFrame(render);
+      animationRef.current = requestAnimationFrame(render);
     };
 
     render();
   };
 
   useEffect(() => {
-    startDetectionLoop();
-  }, []);
+    if (videoSource !== 'smartphone') startDetectionLoop();
+    return () => {
+      if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+    };
+  }, [cameraActive, videoSource, t]);
 
   const handleInjectPothole = async () => {
     const newObs: Observation = {
@@ -324,7 +340,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
         latitude: 12.9363,
         longitude: 77.6946,
         horizontalAccuracyM: 1.2,
-        provenance: 'measured',
+        provenance: 'simulated',
       },
       perceptionOutput: [
         {
@@ -340,7 +356,15 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
       inputMode: 'simulated',
     };
 
-    await apiClient.postObservation(newObs);
+    try {
+      await apiClient.postObservation(newObs);
+      setActionNotice('Demo observation sent. The warning below is a local scenario.');
+      const updatedCases = await apiClient.getCases();
+      setCases(updatedCases);
+      if (updatedCases.length) setSelectedCase(updatedCases[0]);
+    } catch {
+      setActionNotice('Backend unavailable. Playing the local demonstration only.');
+    }
 
     triggerAlert({
       id: `alert_pothole_${Date.now()}`,
@@ -381,441 +405,62 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
     ? getLocalizedMessage(selectedLanguage, activeAlert.messageKey as any)
     : null;
 
+  const runCaseAction = async (kind: 'draft' | 'submit') => {
+    if (!selectedCase) return;
+    setCaseBusy(true);
+    try {
+      const result = kind === 'draft'
+        ? await apiClient.generateGeminiReport(selectedCase.id)
+        : await apiClient.submitToAuthority(selectedCase.id);
+      if (result?.error) throw new Error(result.error);
+      const updated = await apiClient.getCases();
+      setCases(updated);
+      setSelectedCase(updated.find((item) => item.id === selectedCase.id) || updated[0] || null);
+      setActionNotice(kind === 'draft' ? 'Report draft prepared for review.' : 'Demo dispatch recorded. No government portal was contacted.');
+    } catch {
+      setActionNotice('This action could not be completed. Check the backend connection and try again.');
+    } finally {
+      setCaseBusy(false);
+    }
+  };
+
   return (
-    <div
-      className={`min-h-[calc(100vh-65px)] px-3 lg:px-6 py-4 transition-colors duration-500 font-['Plus_Jakarta_Sans',sans-serif] ${
-        nightHudMode ? 'bg-[#000000] text-slate-200' : 'bg-[#090D16] text-slate-100'
-      }`}
-    >
-      {/* HEADER CONTROL BAR */}
-      <div
-        className={`flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl mb-4 border transition-all ${
-          nightHudMode
-            ? 'bg-[#000000] border-cyan-500/30 shadow-[0_0_20px_rgba(6,182,212,0.15)]'
-            : 'bg-[#0D1322] border-[#1E293B]'
-        }`}
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-cyan-600/20 text-cyan-400 flex items-center justify-center font-bold border border-cyan-500/30">
-            <Radio className="w-4 h-4" />
+    <div className="premium-page max-w-[1320px] mx-auto px-4 sm:px-6 py-8 sm:py-12 text-[#17263e]">
+      <header className="mb-8"><h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">{t('One road. Shared awareness.')}</h1><p className="text-[#67788f] mt-3">{t('Observe a hazard, warn a driver, and keep the evidence.')}</p></header>
+      {actionNotice && <div role="status" className="flex items-start justify-between gap-3 bg-[#eaf3ff] border border-[#cfe0fa] rounded-2xl p-4 text-sm text-[#315b99] mb-6"><span>{t(actionNotice)}</span><button aria-label={t('Dismiss message')} onClick={() => setActionNotice(null)}><X size={16} /></button></div>}
+      <div className="grid lg:grid-cols-3 gap-5">
+        <section className="premium-panel rounded-[26px] bg-white border border-[#dce5f2] overflow-hidden">
+          <div className="flex items-center gap-3 p-5"><Camera className="text-[#2563eb]" size={19} /><h2 className="font-semibold">{t('Observe')}</h2></div>
+          <div className={`relative bg-[#eaf1fd] aspect-video ${nightHudMode ? 'brightness-75' : ''}`}>
+            <video ref={videoRef} playsInline muted className="hidden" />
+            <canvas ref={canvasRef} width={640} height={400} className="w-full h-full object-cover" aria-label={t('Road observation preview')} />
+            <span className="absolute top-3 left-3 px-3 py-1.5 text-xs rounded-full bg-white/90 text-[#526681]">{videoSource === 'simulation' ? t('Demo scenario') : videoSource === 'laptop' ? cameraActive ? t('Camera preview') : t('Camera unavailable') : phoneConnected ? t('Phone stream') : t('Waiting for phone')}</span>
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-sm text-white">MargAI Active Telematics</span>
-              <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-mono text-[10px] border border-cyan-500/30">
-                CORRIDOR RUNTIME
-              </span>
-            </div>
-            <div className="text-[11px] text-slate-400 font-mono">
-              Corridor: Bangalore ORR (Marathahalli - Bellandur) · road_placeId: ChIJ3Xo98sAUrjsR
-            </div>
+          <div className="p-5"><p className="text-sm text-[#67788f] mb-4">{t('Try a sample observation to see the journey.')}</p><button className="premium-button w-full justify-center" onClick={handleInjectPothole}><Layers size={16} />{t('Try a pothole')}</button></div>
+        </section>
+        <section className="premium-panel rounded-[26px] bg-white border border-[#dce5f2] flex flex-col overflow-hidden">
+          <div className="p-5 flex items-center gap-3"><Compass size={19} className="text-[#2563eb]" /><h2 className="font-semibold">{t('Share')}</h2></div>
+          <div className="relative min-h-[205px] bg-[#eff5ff] overflow-hidden">
+            <svg viewBox="0 0 400 240" className="w-full h-full absolute inset-0" aria-label={t('Illustrated corridor with lead and trailing vehicles')} role="img">
+              <path d="M-20 210L90 180Q140 160 170 105L230 20Q245-5 290-25" fill="none" stroke="#d6e4f8" strokeWidth="38" />
+              <path d="M-20 210L90 180Q140 160 170 105L230 20Q245-5 290-25" fill="none" stroke="#6b99eb" strokeWidth="3" strokeDasharray="7 7" />
+              <circle cx="160" cy="122" r="24" fill="#2563eb" fillOpacity=".08" /><circle cx="160" cy="122" r="8" fill="#2563eb" /><text x="181" y="127" fill="#526681" fontSize="12">{t('Lead vehicle')}</text>
+              <circle cx="94" cy="180" r="8" fill="#269976" /><text x="110" y="201" fill="#526681" fontSize="12">{t('Trailing vehicle')}</text>
+              {v2vActive && <circle cx="160" cy="122" r="26" fill="none" stroke="#2563eb" className="animate-ping" />}
+            </svg>
           </div>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={() => setShowPhoneModal(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
-              phoneConnected
-                ? 'bg-[#34A853]/20 border-[#34A853] text-[#34A853] shadow-[0_0_12px_rgba(52,168,83,0.3)]'
-                : 'bg-[#EA4335]/15 border-[#EA4335]/50 text-[#EA4335] hover:bg-[#EA4335]/25'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5 animate-pulse" />
-            <span>{phoneConnected ? `📱 Phone Live (${phoneFps} FPS)` : '📱 Connect Smartphone'}</span>
-          </button>
-
-          <button
-            onClick={() => setNightHudMode(!nightHudMode)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
-              nightHudMode
-                ? 'bg-cyan-500 text-black border-cyan-400'
-                : 'bg-[#090D16] text-slate-300 hover:text-white border-[#1E293B]'
-            }`}
-          >
-            <Moon className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{nightHudMode ? 'Night HUD: On' : 'Night HUD'}</span>
-          </button>
-
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#090D16] border border-[#1E293B] font-mono text-[11px] text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-            <span>Relay: {relayLatencyMs}ms</span>
+          <div className="p-5 flex-1 flex flex-col gap-4">
+            {activeAlert ? <div role="status" className="bg-[#fff7e6] border border-[#f3dfb6] rounded-2xl p-4"><p className="text-xs text-[#92661e] mb-2">{t('Demo warning')}</p><p className="text-lg font-medium">{localizedAlert?.text || t(activeAlert.messageKey)}</p><p className="text-sm text-[#8b7449] mt-2">{t('{distance} m ahead', { distance: activeAlert.distanceAheadM ?? '—' })}</p></div> : <p className="text-sm text-[#67788f] leading-relaxed">{t('Relevant warnings reach drivers approaching on the same road.')}</p>}
+            <div className="mt-auto">{activeAlert ? <button onClick={handleClearAlert} className="premium-button-secondary w-full justify-center">{t('Acknowledge')}</button> : <span className="text-sm text-[#67788f]">{t('Ready for an observation')}</span>}</div>
           </div>
-        </div>
+        </section>
+        <section className="premium-panel rounded-[26px] bg-white border border-[#dce5f2] flex flex-col overflow-hidden">
+          <div className="p-5 flex items-center gap-3"><FileText size={19} className="text-[#2563eb]" /><h2 className="font-semibold">{t('Improve')}</h2></div>
+          <div className="p-5 pt-2 flex flex-col flex-1 gap-5"><div className="bg-[#edfaf4] rounded-2xl p-5"><ShieldCheck size={30} className="text-[#269976] mb-5" /><p className="text-3xl font-semibold tabular-nums">{cases.length}</p><p className="text-sm text-[#58796e] mt-2">{t('Cases ready for review')}</p></div><p className="text-sm leading-relaxed text-[#67788f]">{t('Keep observations together and prepare a report for review.')}</p><button disabled={!selectedCase || caseBusy} onClick={() => runCaseAction('draft')} className="premium-button mt-auto w-full justify-center disabled:opacity-40"><FileText size={16} />{caseBusy ? t('Working…') : t('Prepare report')}</button></div>
+        </section>
       </div>
-
-      {/* 3-PANE GRID */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* PANE 1: OPTICAL PERCEPTION & SENSOR TELEMETRY */}
-        <div
-          className={`lg:col-span-4 p-4 rounded-2xl border flex flex-col justify-between space-y-4 ${
-            nightHudMode ? 'bg-[#000000] border-cyan-500/20' : 'bg-[#0D1322] border-[#1E293B]'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between pb-2.5 border-b border-[#1E293B] mb-3">
-              <span className="text-xs font-bold text-slate-300 font-mono flex items-center gap-2">
-                <Camera className="w-3.5 h-3.5 text-cyan-400" />
-                <span>PANE 1 · OPTICAL & SENSORS</span>
-              </span>
-
-              <div className="flex items-center gap-1.5">
-                <select
-                  value={videoSource}
-                  onChange={(e) => {
-                    const src = e.target.value as any;
-                    setVideoSource(src);
-                    if (src === 'laptop') startCamera();
-                    else stopCamera();
-                  }}
-                  className="bg-[#090D16] text-slate-300 text-[10px] font-mono border border-[#1E293B] rounded px-2 py-0.5 focus:border-[#4285F4]"
-                >
-                  <option value="smartphone">📱 Smartphone Cam {phoneConnected ? '(Live)' : '(Standby)'}</option>
-                  <option value="laptop">💻 Laptop Camera</option>
-                  <option value="simulation">🎬 Simulation HUD</option>
-                </select>
-
-                <button
-                  onClick={() => setShowPhoneModal(true)}
-                  className="p-1 rounded bg-[#090D16] text-[#EA4335] hover:text-white border border-[#1E293B]"
-                  title="Scan Smartphone QR Code"
-                >
-                  <QrCode className="w-3 h-3" />
-                </button>
-              </div>
-            </div>
-
-            <div className="relative rounded-xl overflow-hidden border border-[#1E293B] bg-[#05070E] aspect-[16/10]">
-              <video ref={videoRef} playsInline muted className="hidden" />
-              <canvas ref={canvasRef} width={640} height={400} className="w-full h-full object-cover" />
-
-              <div className="absolute top-2 left-2 bg-black/80 px-2 py-0.5 rounded text-[10px] font-mono text-cyan-300 border border-white/10">
-                24mm f/1.8 · ISO 160 · 1/120s
-              </div>
-
-              <div className="absolute top-2 right-2 bg-black/80 px-2 py-0.5 rounded text-[10px] font-mono text-emerald-400 border border-white/10">
-                16.4ms · LiteRT-v1.4
-              </div>
-
-              <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between text-[10px] font-mono text-slate-300 bg-black/80 px-2 py-1 rounded border border-white/10">
-                <span className="text-rose-400 font-bold">TARGET: D40 POTHOLE</span>
-                <span className="text-amber-300">DEPTH: 7.8cm</span>
-                <span className="text-cyan-400">RANGE: 30m</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-2 pt-1 font-mono">
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="p-3 rounded-xl bg-[#080C16] border border-[#1E293B]">
-                <div className="text-[10px] text-slate-400 uppercase">Z-ACCEL</div>
-                <div className="text-xl font-bold text-[#EA4335]">
-                  {zAccelG > 0 ? `+${zAccelG}G` : `${zAccelG}G`}
-                </div>
-                <div className="text-[10px] text-slate-500">200Hz Sample</div>
-              </div>
-
-              <div className="p-3 rounded-xl bg-[#080C16] border border-[#1E293B]">
-                <div className="text-[10px] text-slate-400 uppercase">ALTITUDE (MSL)</div>
-                <div className="text-xl font-bold text-[#4285F4]">{baroAltM}m</div>
-                <div className="text-[10px] text-slate-500">912.4 hPa</div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                onClick={handleInjectPothole}
-                className="py-2 px-2.5 rounded-lg bg-[#EA4335]/15 hover:bg-[#EA4335]/25 border border-[#EA4335]/40 text-[#EA4335] text-xs font-bold font-mono transition-all"
-              >
-                Inject Pothole (Red)
-              </button>
-
-              <button
-                onClick={handleInjectObstacle}
-                className="py-2 px-2.5 rounded-lg bg-[#FBBC05]/15 hover:bg-[#FBBC05]/25 border border-[#FBBC05]/40 text-[#FBBC05] text-xs font-bold font-mono transition-all"
-              >
-                Inject Cattle (Yellow)
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* PANE 2: CORRIDOR GRAPH & V2V RELAY */}
-        <div
-          className={`lg:col-span-4 p-4 rounded-2xl border flex flex-col justify-between space-y-4 ${
-            nightHudMode ? 'bg-[#000000] border-[#4285F4]/30' : 'bg-[#0D1322] border-[#1E293B]'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between pb-2.5 border-b border-[#1E293B] mb-3">
-              <span className="text-xs font-bold text-slate-300 font-mono flex items-center gap-2">
-                <MapPin className="w-3.5 h-3.5 text-[#4285F4]" />
-                <span>PANE 2 · CORRIDOR & V2V</span>
-              </span>
-              <span className="text-xs font-mono text-[#FBBC05] font-bold">{speedKmh} KM/H</span>
-            </div>
-
-            <div className="relative rounded-xl overflow-hidden border border-[#1E293B] bg-[#05070E] aspect-[16/11] p-3 flex flex-col justify-between">
-              <svg viewBox="0 0 400 280" className="absolute inset-0 w-full h-full">
-                <defs>
-                  <filter id="googleBlueGlow" x="-20%" y="-20%" width="140%" height="140%">
-                    <feGaussianBlur stdDeviation="4" result="blur" />
-                    <feMerge>
-                      <feMergeNode in="blur" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                </defs>
-
-                <pattern id="radarGrid" width="25" height="25" patternUnits="userSpaceOnUse">
-                  <path d="M 25 0 L 0 0 0 25" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
-                </pattern>
-                <rect width="100%" height="100%" fill="url(#radarGrid)" />
-
-                {/* GOOGLE BLUE CARRIAGEWAY PATH */}
-                <path
-                  d="M 60 40 C 130 90, 180 140, 240 180 C 290 210, 320 230, 360 250"
-                  fill="none"
-                  stroke="#1D4ED8"
-                  strokeWidth="10"
-                  opacity="0.3"
-                  filter="url(#googleBlueGlow)"
-                />
-                <path
-                  d="M 60 40 C 130 90, 180 140, 240 180 C 290 210, 320 230, 360 250"
-                  fill="none"
-                  stroke="#4285F4"
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                />
-
-                {/* V2V WAVE RINGS */}
-                {v2vActive && (
-                  <g transform="translate(180, 140)">
-                    <circle r="18" fill="none" stroke="#EA4335" strokeWidth="2" className="animate-ping" />
-                    <circle r="36" fill="none" stroke="#4285F4" strokeWidth="1.5" className="animate-ping" style={{ animationDelay: '200ms' }} />
-                  </g>
-                )}
-
-                {/* Vehicle Markers with Google Colors */}
-                <g transform="translate(180, 140)">
-                  <circle r="8" fill="#4285F4" stroke="#FFFFFF" strokeWidth="2" />
-                  <text x="12" y="4" fill="#93C5FD" fontSize="9" fontFamily="monospace">KA-03 (LEAD)</text>
-                </g>
-
-                <g transform="translate(205, 158)">
-                  <circle r="7" fill="#EA4335" stroke="#FEE2E2" strokeWidth="1.5" />
-                  <text x="10" y="4" fill="#FCA5A5" fontSize="9" fontFamily="monospace">D40 (30m)</text>
-                </g>
-
-                <g transform="translate(110, 75)">
-                  <circle r="8" fill="#34A853" stroke="#FFFFFF" strokeWidth="2" />
-                  <text x="12" y="4" fill="#86EFAC" fontSize="9" fontFamily="monospace">KA-05 (YOU)</text>
-                </g>
-              </svg>
-
-              <div className="relative z-10 flex items-center justify-between text-[10px] font-mono text-slate-300">
-                <span className="bg-black/80 px-2 py-0.5 rounded border border-[#4285F4]/40 text-[#4285F4]">
-                  ROADS_API: ChIJ3Xo98sAUrjsR
-                </span>
-                <span className="bg-black/80 px-2 py-0.5 rounded border border-[#34A853]/40 text-[#34A853]">
-                  V2V: 2 PEERS ACTIVE
-                </span>
-              </div>
-
-              {activeAlert && (
-                <div className="relative z-10 p-2.5 rounded-lg bg-[#EA4335]/20 border border-[#EA4335] text-white font-mono flex items-center justify-between backdrop-blur-md">
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <AlertTriangle className="w-3.5 h-3.5 text-[#EA4335]" />
-                    <span className="text-slate-100 font-bold">{localizedAlert?.text || activeAlert.messageKey}</span>
-                  </div>
-                  <span className="text-xs font-bold text-[#FBBC05]">{activeAlert.distanceAheadM}M</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <AudioWaveform isActive={isAudioActive} label="Audio Stream (48 kHz)" className="w-full" />
-            {activeAlert && (
-              <button
-                onClick={handleClearAlert}
-                className="w-full mt-2 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white text-xs font-mono border border-white/20"
-              >
-                Acknowledge / Clear Alert
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* PANE 3: CIVIC REGISTRY & REPAIR SLA AUDIT */}
-        <div
-          className={`lg:col-span-4 p-4 rounded-2xl border flex flex-col justify-between space-y-4 ${
-            nightHudMode ? 'bg-[#000000] border-cyan-500/20' : 'bg-[#0D1322] border-[#1E293B]'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between pb-2.5 border-b border-[#1E293B] mb-3">
-              <span className="text-xs font-bold text-slate-300 font-mono flex items-center gap-2">
-                <ShieldCheck className="w-3.5 h-3.5 text-[#34A853]" />
-                <span>PANE 3 · DEFECT REGISTRY & SLA</span>
-              </span>
-              <span className="text-[10px] font-mono text-[#34A853] font-bold">BBMP SAHAAYA · GOVTECH</span>
-            </div>
-
-            <div className="p-3 rounded-xl bg-[#080C16] border border-[#1E293B] space-y-2 mb-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-white">Kadubeesanahalli Defect</span>
-                <span className="px-2 py-0.5 rounded-full bg-[#EA4335]/20 border border-[#EA4335]/40 text-[#EA4335] font-mono text-[10px] font-bold">
-                  SEVERITY: 9.2/10
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-1 text-[11px] font-mono text-slate-400">
-                <div>Ticket: <span className="text-[#4285F4]">BBMP-RD-666762</span></div>
-                <div>Ward: <span className="text-slate-200">Mahadevapura 85</span></div>
-                <div>Passes: <span className="text-[#FBBC05]">4 Vehicles</span></div>
-                <div>SLA: <span className="text-[#34A853]">48h Bitumen Seal</span></div>
-              </div>
-            </div>
-
-            <div>
-              <div className="text-[10px] font-bold text-slate-400 uppercase mb-1.5 font-mono flex items-center justify-between">
-                <span>Contractor Repair Audit</span>
-                <span className="text-[#34A853]">SLA Verified</span>
-              </div>
-              <BeforeAfterSlider />
-            </div>
-          </div>
-
-          <div className="space-y-1.5 pt-1">
-            <button
-              onClick={async () => {
-                if (selectedCase) {
-                  await apiClient.generateGeminiReport(selectedCase.id);
-                  const updated = await apiClient.getCases();
-                  setCases(updated);
-                  if (updated.length > 0) setSelectedCase(updated[0]);
-                  audioSynthesizer.speakLocalVoicePhrase('Statutory notice prepared.', selectedLanguage);
-                }
-              }}
-              className="w-full py-2 px-3 rounded-xl bg-[#4285F4]/15 hover:bg-[#4285F4]/25 text-[#4285F4] text-xs font-mono font-bold border border-[#4285F4]/40 transition-all flex items-center justify-center gap-1.5"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              <span>Draft Notice (Gemini 2.5 Flash · IRC:SP:84)</span>
-            </button>
-
-            <button
-              onClick={async () => {
-                if (selectedCase) {
-                  await apiClient.submitToAuthority(selectedCase.id);
-                  const updated = await apiClient.getCases();
-                  setCases(updated);
-                  if (updated.length > 0) setSelectedCase(updated[0]);
-                  audioSynthesizer.speakLocalVoicePhrase('Dispatched to municipal portal.', selectedLanguage);
-                }
-              }}
-              className="w-full py-2 px-3 rounded-xl bg-[#34A853]/15 hover:bg-[#34A853]/25 text-[#34A853] text-xs font-mono font-bold border border-[#34A853]/40 transition-all flex items-center justify-center gap-1.5"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>Dispatch Ticket to BBMP (Sahaaya Portal)</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* SMARTPHONE DASHCAM MODAL & SCANNABLE QR CODE */}
-      {showPhoneModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#0D1322] border border-[#1E293B] rounded-2xl max-w-md w-full p-6 relative font-mono text-slate-100 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-            <button
-              onClick={() => setShowPhoneModal(false)}
-              className="absolute top-4 right-4 p-1.5 rounded-lg bg-[#090D16] text-slate-400 hover:text-white border border-[#1E293B]"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-[#EA4335]/20 border border-[#EA4335]/40 flex items-center justify-center text-[#EA4335]">
-                <Smartphone className="w-5 h-5 animate-pulse" />
-              </div>
-              <div>
-                <h3 className="font-bold text-base text-white">Connect Smartphone Dashcam</h3>
-                <p className="text-xs text-slate-400">Point phone at the road & stream AI updates in no time</p>
-              </div>
-            </div>
-
-            <div className="bg-[#090D16] p-4 rounded-xl border border-[#1E293B] flex flex-col items-center text-center space-y-3 mb-4">
-              <p className="text-xs text-slate-300 font-sans">
-                Scan with any iPhone or Android camera to start streaming:
-              </p>
-              <div className="p-3 bg-white rounded-xl shadow-lg">
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
-                    typeof window !== 'undefined'
-                      ? `${window.location.origin}/?mode=smartphone`
-                      : 'https://9ffd3d1d143b50.app.lhr.life/?mode=smartphone'
-                  )}`}
-                  alt="Smartphone Dashcam QR"
-                  className="w-44 h-44"
-                />
-              </div>
-              <a
-                href={typeof window !== 'undefined' ? `${window.location.origin}/?mode=smartphone` : '/?mode=smartphone'}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[12px] text-cyan-400 font-mono break-all font-bold hover:underline"
-              >
-                {typeof window !== 'undefined' ? `${window.location.origin}/?mode=smartphone` : '/?mode=smartphone'}
-              </a>
-              <p className="text-[10px] text-slate-400 font-sans max-w-xs">
-                🔒 Secure HTTPS context unlocks your phone's hardware camera. Tap "Advanced &gt; Proceed" if prompted.
-              </p>
-            </div>
-
-            <div className="space-y-2 text-xs text-slate-300 mb-5">
-              <div className="flex items-center justify-between p-2.5 rounded-lg bg-[#090D16] border border-[#1E293B]">
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full ${
-                      phoneConnected ? 'bg-[#34A853]' : 'bg-[#FBBC05] animate-ping'
-                    }`}
-                  />
-                  <span>Phone Status:</span>
-                </span>
-                <span className={`font-bold ${phoneConnected ? 'text-[#34A853]' : 'text-slate-400'}`}>
-                  {phoneConnected ? `Active Stream (${phoneFps} FPS)` : 'Waiting for device...'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between p-2 rounded bg-[#090D16] text-[11px] text-slate-400">
-                <span>Inference Latency:</span>
-                <span className="text-emerald-400 font-bold">&lt; 15 ms · Apple Silicon MPS</span>
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <a
-                href="/?mode=smartphone"
-                target="_blank"
-                rel="noreferrer"
-                className="flex-1 py-2.5 px-3 rounded-xl bg-[#4285F4] hover:bg-[#3367D6] text-white font-bold text-xs text-center flex items-center justify-center gap-1.5 transition-all"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>Open Phone Simulator</span>
-              </a>
-              <button
-                onClick={() => {
-                  setVideoSource('smartphone');
-                  setShowPhoneModal(false);
-                }}
-                className="py-2.5 px-4 rounded-xl bg-[#1E293B] hover:bg-slate-700 text-white font-bold text-xs"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <details className="mt-6 rounded-2xl border border-[#dce5f2] bg-white/80"><summary className="p-5 cursor-pointer text-sm font-medium text-[#526681]">{t('Settings and details')}</summary><div className="p-5 pt-0 space-y-5"><div className="flex flex-wrap items-center gap-3"><select aria-label={t('Camera input source')} value={videoSource} onChange={(e) => { const src = e.target.value as 'laptop' | 'smartphone' | 'simulation'; setVideoSource(src); if (src === 'laptop') startCamera(); else stopCamera(); }} className="bg-[#f5f8ff] text-sm border border-[#dce5f2] rounded-xl px-3 py-3"><option value="simulation">{t('Demo scenario')}</option><option value="laptop">{t('Device camera')}</option><option value="smartphone">{t('Phone stream')}</option></select><button onClick={() => setShowPhoneModal(true)} className="premium-button-secondary"><Smartphone size={17} />{phoneConnected ? t('Phone connected') : t('Connect a phone')}</button><button onClick={() => setNightHudMode(!nightHudMode)} aria-pressed={nightHudMode} className="premium-button-secondary"><Moon size={17} />{nightHudMode ? t('Standard preview') : t('Dim preview')}</button><button className="premium-button-secondary" onClick={handleInjectObstacle}><AlertTriangle size={16} />{t('Try an animal crossing')}</button></div><div className="grid sm:grid-cols-3 gap-3 text-sm text-[#67788f]"><p>{t('Hazard records: {count}', {count: hazards.length})}</p><p>{t('Vertical acceleration: {value} G', {value: zAccelG.toFixed(2)})}</p><p>{t('Altitude: {value} m', {value: baroAltM.toFixed(1)})}</p></div><p className="text-xs text-[#67788f]">{t('Telemetry is illustrative in demo mode')}{' · '}{relayConnected ? t('Backend available') : t('Backend unavailable')}</p><AudioWaveform isActive={isAudioActive} label={isAudioActive ? t('Warning audio') : t('Audio standby')} className="w-full" />{cases.length > 0 && <div className="flex flex-wrap gap-3"><select aria-label={t('Civic case')} value={selectedCase?.id || ''} onChange={(e) => setSelectedCase(cases.find((item) => item.id === e.target.value) || null)} className="bg-[#f5f8ff] border border-[#dce5f2] rounded-xl p-3 text-sm max-w-full">{cases.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select><button disabled={!selectedCase || caseBusy} onClick={() => runCaseAction('submit')} className="premium-button-secondary disabled:opacity-40"><Send size={16} />{t('Simulate dispatch')}</button></div>}<p className="text-xs text-[#67788f]">{t('Dispatch is simulated. No official complaint portal is contacted.')}</p></div></details>
+      {showPhoneModal && <div className="fixed inset-0 z-[80] bg-[#17263e]/25 backdrop-blur-md flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="phone-modal-title" onClick={() => setShowPhoneModal(false)}><div className="bg-white border border-[#dce5f2] rounded-3xl max-w-md w-full p-6 sm:p-8 relative max-h-[90vh] overflow-y-auto shadow-xl" onClick={(event) => event.stopPropagation()}><button aria-label={t('Close phone connection')} onClick={() => setShowPhoneModal(false)} className="absolute right-4 top-4 p-2 text-[#67788f]"><X size={20} /></button><Smartphone size={28} className="text-[#2563eb] mb-5" /><h2 id="phone-modal-title" className="text-2xl font-semibold">{t('Connect your phone')}</h2><p className="text-sm text-[#67788f] leading-relaxed mt-3">{t('Scan the code, allow camera access, and choose the phone stream.')}</p><div className="my-6 flex justify-center"><img src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(phoneUrl)}`} alt={t('QR code for the phone camera view')} width={180} height={180} /></div><a href={phoneUrl} target="_blank" rel="noreferrer" className="text-sm text-[#2563eb] break-all underline underline-offset-4">{phoneUrl}</a><p className="text-xs leading-relaxed text-[#67788f] mt-4">{t('Use an accessible HTTPS address for a separate phone. Localhost works only on this device.')}</p><a href={phoneUrl} target="_blank" rel="noreferrer" className="premium-button mt-5 w-full justify-center"><ExternalLink size={16} />{t('Open phone view')}</a></div></div>}
     </div>
   );
 };

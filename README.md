@@ -183,3 +183,20 @@ BUILDATHON/
 ## 🏆 Credits
 Developed for the **Google Startup Buildathon India 2026** by team MargAI.  
 Empowering India's commuters and municipal authorities through **Google AI & Google Cloud**.
+
+
+## Run it on a phone (PWA)
+
+```bash
+npm install
+npm run build:packages
+npm run dev          # API :8080 + web :5173 (served on your LAN)
+```
+
+Open `http://<your-computer-LAN-IP>:5173/?view=smartphone` on the phone (same Wi-Fi). Tap **Start drive**:
+a lead car sees a pothole, the Cloud Run-style relay warns only the relevant trailing car (the opposite carriageway
+and the service road stay quiet), the hazard clears when passed, and one civic case is created. Use **Add to Home Screen**
+to install it (manifest + offline shell included). Browsers only expose GPS on HTTPS or `localhost`, so the
+**Use my location** button needs an HTTPS URL (e.g. the Cloud Run deployment or an HTTPS tunnel).
+Set `VITE_GOOGLE_MAPS_API_KEY` in `apps/web/.env.local` to render Google Maps instead of OpenStreetMap.
+`node scripts/e2e-relay.cjs` replays the four-vehicle relay test against a running API.

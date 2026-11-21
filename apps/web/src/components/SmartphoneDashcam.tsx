@@ -1,899 +1,103 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  Camera,
-  Smartphone,
-  AlertTriangle,
-  Volume2,
-  VolumeX,
-  Compass,
-  Radio,
-  Zap,
-  Maximize2,
-  Minimize2,
-  Activity,
-  CheckCircle,
-  RefreshCw,
-  Eye,
-  ShieldAlert,
-  Flame,
-  X,
-  Link,
-  Check,
-  Cpu,
-  Loader2,
-} from 'lucide-react';
-import Peer from 'peerjs';
-import {
-  loadDetectionModel,
-  getModelStatus,
-  detectHazards,
-  startGeoTracking,
-  stopGeoTracking,
-  getCurrentPosition,
-  type DetectedHazard,
-  type DetectionResult,
-} from '../services/hazardDetector';
-
-interface HazardBox {
-  hazard_type: string;
-  bbox: [number, number, number, number];
-  risk_level: string;
-  confidence: number;
-  distance_m?: number;
-  ttc_sec?: number;
-  label?: string;
-  geo?: { lat: number; lng: number; accuracy: number };
-}
-
-export const SmartphoneDashcam: React.FC = () => {
-  const [cameraActive, setCameraActive] = useState<boolean>(false);
-  const [isStreaming, setIsStreaming] = useState<boolean>(true);
-  const [videoSource, setVideoSource] = useState<'sample_video' | 'camera' | 'custom_file'>('camera');
-  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
-  const [audioEnabled, setAudioEnabled] = useState<boolean>(true);
-
-  // ML Model State
-  const [mlModelLoaded, setMlModelLoaded] = useState<boolean>(false);
-  const [mlModelLoading, setMlModelLoading] = useState<boolean>(false);
-  const [mlInferenceMs, setMlInferenceMs] = useState<number>(0);
-  const [mlDetectionActive, setMlDetectionActive] = useState<boolean>(false);
-
-  // WebRTC Pairing to Infotainment
-  const [pairTarget, setPairTarget] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('pair') || '';
-    }
-    return '';
-  });
-  const [manualPairInput, setManualPairInput] = useState<string>('');
-  const [isPeerStreaming, setIsPeerStreaming] = useState<boolean>(false);
-  const peerInstanceRef = useRef<Peer | null>(null);
-  const dataConnRef = useRef<any>(null);
-
-  // Live Telemetry from Smartphone Sensors
-  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number; accuracy: number }>({
-    lat: 12.9716,
-    lng: 77.5946,
-    accuracy: 10,
-  });
-  const [speedKmh, setSpeedKmh] = useState<number>(65);
-  const [zAccelG, setZAccelG] = useState<number>(1.02);
-  const [fps, setFps] = useState<number>(24);
-  const [isBumpSpike, setIsBumpSpike] = useState<boolean>(false);
-
-  // Hazards Display — now populated by real ML detections
-  const [activeHazards, setActiveHazards] = useState<HazardBox[]>([]);
-  const [sightMode, setSightMode] = useState<'auto' | 'clear' | 'pedestrian' | 'pothole' | 'cattle' | 'water'>('auto');
-  const sightModeRef = useRef(sightMode);
-  sightModeRef.current = sightMode;
-
-  const [roadCurve, setRoadCurve] = useState<string>('STRAIGHT');
-  const [criticalAlert, setCriticalAlert] = useState<string | null>(null);
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const bcRef = useRef<BroadcastChannel | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const waveformHistoryRef = useRef<number[]>(Array(50).fill(0));
-  const detectionLoopRef = useRef<number | null>(null);
-  const lastAlertRef = useRef<string>('');
-
-  const telemetryRef = useRef({
-    speedKmh,
-    zAccelG,
-    roadCurve,
-    activeHazards,
-    fps,
-  });
-  useEffect(() => {
-    telemetryRef.current = { speedKmh, zAccelG, roadCurve, activeHazards, fps };
-  }, [speedKmh, zAccelG, roadCurve, activeHazards, fps]);
-
-  const applySightMode = (mode: 'auto' | 'clear' | 'pedestrian' | 'pothole' | 'cattle' | 'water') => {
-    setSightMode(mode);
-    if (mode === 'clear') {
-      setActiveHazards([]);
-    } else if (mode === 'pedestrian') {
-      setActiveHazards([
-        {
-          hazard_type: 'PEDESTRIAN',
-          bbox: [66, 26, 84, 82],
-          confidence: 0.88,
-          risk_level: 'CRITICAL',
-          distance_m: 60,
-          label: 'PEDESTRIAN',
-          geo: gpsCoords,
-        },
-      ]);
-    } else if (mode === 'pothole') {
-      setActiveHazards([
-        {
-          hazard_type: 'POTHOLE',
-          bbox: [22, 58, 48, 80],
-          confidence: 0.92,
-          risk_level: 'HIGH',
-          distance_m: 45,
-          label: 'POTHOLE',
-          geo: gpsCoords,
-        },
-      ]);
-    } else if (mode === 'cattle') {
-      setActiveHazards([
-        {
-          hazard_type: 'ANIMAL',
-          bbox: [35, 38, 65, 68],
-          confidence: 0.89,
-          risk_level: 'CRITICAL',
-          distance_m: 50,
-          label: 'CATTLE',
-          geo: gpsCoords,
-        },
-      ]);
-    } else if (mode === 'water') {
-      setActiveHazards([
-        {
-          hazard_type: 'WATERLOGGING',
-          bbox: [20, 62, 72, 88],
-          confidence: 0.91,
-          risk_level: 'HIGH',
-          distance_m: 40,
-          label: 'WATERLOGGING',
-          geo: gpsCoords,
-        },
-      ]);
-    }
+import {PhoneLocationMap} from './PhoneLocationMap';
+import React,{useEffect,useRef,useState} from 'react';
+import {Camera,CameraOff,Activity,MapPin,Compass,Cpu,RefreshCw,Radio,AlertTriangle,RotateCw} from 'lucide-react';
+import {DeviceTelemetry,emptyTelemetry,type Telemetry} from '../mobile/telemetry';
+import {PhoneVision,emptyModels,type ModelState} from '../mobile/vision';
+import {PhoneBridge,validTarget,type LinkState} from '../mobile/bridge';
+import {Tracker,type Track} from '../driver/tracker';
+import {deviceId} from '../driver/signals';
+import {apiClient} from '../services/apiClient';
+import '../mobile.css';
+const COLORS={pothole:'#e7b958',pedestrian:'#ef8f73',animal:'#c8db96',vehicle:'#a6cbe5'};
+const label=(track:Track)=>track.cls==='pedestrian'?'Pedestrian':track.cls==='pothole'?'Pothole':track.cls==='animal'?(track.box.label||'Animal'):(track.box.label||'Vehicle');
+const fmt=(n:number|null|undefined,digits=1)=>n==null?'—':n.toFixed(digits);
+const stateLabel=(state:string)=>({off:'Not started',requesting:'Requesting permission',waiting:'Waiting for readings',active:'Receiving readings',denied:'Permission denied',unavailable:'Unavailable',error:'Needs attention',loading:'Loading model',ready:'Model ready'}[state]||state);
+export const SmartphoneDashcam:React.FC=()=>{
+  const [phase,setPhase]=useState<'off'|'starting'|'running'>('off');const [error,setError]=useState('');
+  const [models,setModels]=useState<ModelState>(emptyModels);const [telemetry,setTelemetry]=useState<Telemetry>(emptyTelemetry);
+  const [tracks,setTracks]=useState<Track[]>([]);const [inference,setInference]=useState({ms:0,fps:0,frames:0});
+  const [target,setTarget]=useState(()=>new URLSearchParams(location.search).get('pair')||'');
+  const [link,setLink]=useState<LinkState>({state:'off',message:'No car paired'});const [backend,setBackend]=useState(false);
+  const [sharing,setSharing]=useState('Observations stay on this phone until location and heading are available.');
+  const [facing,setFacing]=useState<'environment'|'user'>('environment');const [now,setNow]=useState(Date.now());
+  const video=useRef<HTMLVideoElement>(null);const stream=useRef<MediaStream|null>(null);const frame=useRef<HTMLCanvasElement>(document.createElement('canvas'));const jpeg=useRef<HTMLCanvasElement>(document.createElement('canvas'));
+  const mounted=useRef(true);const active=useRef(false);const operation=useRef(0);const sensors=useRef<DeviceTelemetry|null>(null);const vision=useRef<PhoneVision|null>(null);const bridge=useRef<PhoneBridge|null>(null);const tracker=useRef(new Tracker());const source=useRef(deviceId());const sent=useRef<Record<string,number>>({});const sensorRef=useRef(telemetry);sensorRef.current=telemetry;
+  if(!sensors.current)sensors.current=new DeviceTelemetry(value=>{sensorRef.current=value;if(mounted.current)setTelemetry(value);});
+  if(!vision.current)vision.current=new PhoneVision(value=>{if(mounted.current)setModels(value);});
+  if(!bridge.current)bridge.current=new PhoneBridge(value=>{if(mounted.current)setLink(value);});
+  useEffect(()=>{mounted.current=true;let alive=true;const timer=setInterval(()=>setNow(Date.now()),1000);
+    // A static hosted phone page can use WebRTC without a REST backend.
+    if(!location.hostname.endsWith('github.io')||import.meta.env.VITE_API_ORIGIN)void apiClient.getHealth().then(data=>{if(alive)setBackend(data.status==='ok');}).catch(()=>{});
+    return()=>{alive=false;mounted.current=false;active.current=false;operation.current++;clearInterval(timer);stream.current?.getTracks().forEach(t=>t.stop());sensors.current?.stop();bridge.current?.close();vision.current?.dispose();};
+  },[]);
+  useEffect(()=>{if(!validTarget(target))return;bridge.current!.connect(target,backend);bridge.current!.attach(stream.current);return()=>bridge.current!.close();},[backend]);
+  const loadModels=async()=>{await vision.current!.load();if(!mounted.current)vision.current!.dispose();};
+  const start=async(nextFacing=facing)=>{
+    if(phase==='starting')return;
+    if(!window.isSecureContext){setError('Camera, GPS and motion need a secure connection. Open this page over HTTPS or localhost.');return;}
+    if(!navigator.mediaDevices?.getUserMedia){setError('This browser does not provide camera access. Open the page in Chrome on Android.');return;}
+    const id=++operation.current;setPhase('starting');setError('');
+    // All permission requests originate in this tap, before any model download.
+    void sensors.current!.startMotion();sensors.current!.startGPS();
+    active.current=false;stream.current?.getTracks().forEach(track=>track.stop());
+    try{
+      const media=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:nextFacing},width:{ideal:640},height:{ideal:480}}});
+      if(!mounted.current||id!==operation.current){media.getTracks().forEach(track=>track.stop());return;}
+      stream.current=media;video.current!.srcObject=media;await video.current!.play();
+      active.current=true;setPhase('running');bridge.current!.attach(media);void loadModels();
+    }catch(cause:any){if(id===operation.current&&mounted.current){stream.current?.getTracks().forEach(track=>track.stop());stream.current=null;setPhase('off');setError(cause?.name==='NotAllowedError'?'Camera permission denied. Allow Camera in this site’s permissions, then tap Start camera.':cause?.name==='NotFoundError'?'No camera was found on this device.':`Camera could not start: ${cause?.message||cause}`);}}
   };
-
-  // Initialize BroadcastChannel & WebSocket
-  useEffect(() => {
-    try {
-      bcRef.current = new BroadcastChannel('margai_road_telemetry');
-    } catch (e) {}
-
-    let ws: WebSocket | null = null;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/ws/telemetry`;
-
-    const connectWs = () => {
-      try {
-        ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-        ws.onopen = () => {};
-        ws.onclose = () => {
-          setTimeout(connectWs, 2500);
-        };
-      } catch (e) {}
-    };
-
-    connectWs();
-    return () => {
-      if (bcRef.current) bcRef.current.close();
-      if (ws) ws.close();
-    };
-  }, []);
-
-  // ── Load ML Model & Start GPS Tracking ──
-  useEffect(() => {
-    startGeoTracking();
-
-    const loadModel = async () => {
-      setMlModelLoading(true);
-      const success = await loadDetectionModel();
-      setMlModelLoaded(success);
-      setMlModelLoading(false);
-      if (success) {
-        setSourceNotice('🧠 AI Model Loaded — Real-time hazard detection active');
-      }
-    };
-
-    loadModel();
-
-    return () => {
-      stopGeoTracking();
-      if (detectionLoopRef.current) {
-        cancelAnimationFrame(detectionLoopRef.current);
-      }
-    };
-  }, []);
-
-  // ── ML Detection Loop — Non-blocking 350ms interval (Zero Lag) ──
-  useEffect(() => {
-    if (!cameraActive) return;
-
-    if (!analysisCanvasRef.current) {
-      const c = document.createElement('canvas');
-      c.width = 120;
-      c.height = 90;
-      (analysisCanvasRef as any).current = c;
-    }
-
-    setMlDetectionActive(true);
-    setMlModelLoaded(true);
-
-    const interval = setInterval(async () => {
-      if (sightModeRef.current !== 'auto') return;
-      if (!videoRef.current || videoRef.current.readyState < 2) return;
-
-      try {
-        const result: DetectionResult = await detectHazards(
-          videoRef.current,
-          analysisCanvasRef.current!
-        );
-
-        setMlInferenceMs(result.inferenceMs);
-
-        const pos = getCurrentPosition();
-        if (pos) {
-          setGpsCoords({ lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy || 10 });
-        }
-
-        if (result.hazards.length > 0) {
-          const newHazards: HazardBox[] = result.hazards.map((h) => ({
-            hazard_type: h.hazard_type,
-            bbox: h.bbox,
-            risk_level: h.risk_level,
-            confidence: h.confidence,
-            distance_m: h.distance_m,
-            label: h.label,
-            geo: h.geo,
-          }));
-          setActiveHazards(newHazards);
-        } else {
-          setActiveHazards([]);
-        }
-      } catch (err) {}
-    }, 350);
-
-    return () => {
-      clearInterval(interval);
-      setMlDetectionActive(false);
-    };
-  }, [cameraActive]);
-
-  // Motion Sensor (Z-axis Accelerometer)
-  useEffect(() => {
-    const handleMotion = (event: DeviceMotionEvent) => {
-      if (event.accelerationIncludingGravity && event.accelerationIncludingGravity.z !== null) {
-        const rawZ = event.accelerationIncludingGravity.z;
-        const gVal = Math.round((Math.abs(rawZ) / 9.80665) * 100) / 100;
-        setZAccelG(gVal);
-        if (gVal > 1.8) {
-          triggerBumpSim(gVal);
-        }
-      }
-    };
-
-    window.addEventListener('devicemotion', handleMotion);
-    return () => window.removeEventListener('devicemotion', handleMotion);
-  }, []);
-
-  // WebRTC Peer Connection to Infotainment System
-  const connectToCockpitPeer = (target: string) => {
-    if (!target) return;
-    try {
-      // Reuse existing peer if already open
-      if (peerInstanceRef.current && !peerInstanceRef.current.destroyed && peerInstanceRef.current.open) {
-        initiateCallAndData(peerInstanceRef.current, target);
-        return;
-      }
-
-      if (peerInstanceRef.current) peerInstanceRef.current.destroy();
-      const peer = new Peer({
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun.cloudflare.com:3478' },
-          ],
-        },
-      });
-      peerInstanceRef.current = peer;
-
-      peer.on('open', (id) => {
-        console.log('Smartphone Peer open, calling:', target);
-        initiateCallAndData(peer, target);
-      });
-
-      peer.on('error', (err) => {
-        console.warn('Peer connection note:', err);
-      });
-    } catch (e) {
-      console.error('Peer connection error:', e);
-    }
-  };
-
-  const initiateCallAndData = (peer: Peer, target: string) => {
-    let activeStream = streamRef.current;
-    if (!activeStream && videoRef.current && (videoRef.current as any).captureStream) {
-      try {
-        activeStream = (videoRef.current as any).captureStream();
-      } catch (e) {}
-    }
-
-    if (activeStream) {
-      console.log('Initiating WebRTC call with camera stream to:', target);
-      const call = peer.call(target, activeStream);
-      call.on('close', () => setIsPeerStreaming(false));
-      call.on('error', (e) => console.warn('Call error:', e));
-      setIsPeerStreaming(true);
-      setSourceNotice(`Streaming camera feed to Infotainment (${target})`);
-    }
-
-    // Also open DataConnection for frame & telemetry backup
-    try {
-      const conn = peer.connect(target);
-      conn.on('open', () => {
-        console.log('DataConnection established with Cockpit:', target);
-        dataConnRef.current = conn;
-        setIsPeerStreaming(true);
-      });
-      conn.on('close', () => {
-        dataConnRef.current = null;
-      });
-    } catch (e) {}
-  };
-
-  useEffect(() => {
-    if (pairTarget && (streamRef.current || cameraActive)) {
-      connectToCockpitPeer(pairTarget);
-    }
-  }, [pairTarget, cameraActive]);
-
-  // Start Hardware Camera with Automatic Fallback Cascade
-  const startHardwareCamera = async () => {
-    try {
-      setVideoSource('camera');
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-
-      let stream: MediaStream | null = null;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 } },
-          audio: false,
-        });
-      } catch (e1) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' } },
-            audio: false,
-          });
-        } catch (e2) {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: 'user' } },
-              audio: false,
-            });
-          } catch (e3) {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: false,
-            });
+  const stop=()=>{operation.current++;active.current=false;stream.current?.getTracks().forEach(track=>track.stop());stream.current=null;bridge.current!.attach(null);sensors.current!.stop();tracker.current.reset();setTracks([]);setPhase('off');if(video.current)video.current.srcObject=null;};
+  useEffect(()=>{
+    if(phase!=='running')return;let stopped=false;let timer:ReturnType<typeof setTimeout>;let lastTime=performance.now();let count=0;
+    const loop=async()=>{
+      if(stopped||!active.current)return;
+      const v=video.current,cv=frame.current;
+      if(v&&v.readyState>=2&&v.videoWidth){
+        const w=Math.min(640,v.videoWidth);cv.width=w;cv.height=Math.round(v.videoHeight*w/v.videoWidth);cv.getContext('2d',{willReadFrequently:true})!.drawImage(v,0,0,cv.width,cv.height);
+        const result=await vision.current!.detect(cv);
+        if(stopped)return;
+        if(result){const current=tracker.current.update(result.detections,performance.now()).filter(t=>t.misses===0);setTracks(current.map(t=>({...t})));count++;const time=performance.now();setInference({ms:result.ms,fps:1000/Math.max(1,time-lastTime),frames:count});lastTime=time;
+          const data=sensorRef.current;const fresh=data.gpsStatus==='active'&&data.gps&&Date.now()-data.gps.timestamp<15000&&data.gps.accuracy<=50;const heading=data.gps?.heading??(data.headingAt&&Date.now()-data.headingAt<5000?data.heading:null);
+          if(!backend)setSharing('Detection and sensors work on this phone. No road API is connected.');
+          else if(!fresh||heading==null||data.gps?.speedMps==null)setSharing('Sharing waits for a recent GPS fix (±50 m or better), measured speed and heading.');
+          else for(const track of current){if(track.cls==='vehicle'||!track.confirmed||Date.now()-(sent.current[track.cls]||0)<15000)continue;sent.current[track.cls]=Date.now();const gps=data.gps!;const box=track.box;
+            void apiClient.postObservation({id:crypto.randomUUID(),sourceId:source.current,captureTime:new Date().toISOString(),vehiclePose:{latitude:gps.latitude,longitude:gps.longitude,horizontalAccuracyM:gps.accuracy,headingDeg:heading,speedMps:gps.speedMps!},estimatedHazardLocation:{latitude:gps.latitude,longitude:gps.longitude,horizontalAccuracyM:gps.accuracy,provenance:'estimated'},perceptionOutput:[{class:track.cls,confidence:track.conf,bbox:{x:box.x,y:box.y,width:box.w,height:box.h},frameTimeMs:result.ms,modelVersion:track.src}],inputMode:'live'}).then(()=>{if(mounted.current)setSharing('Observation shared. Hazard location is estimated at the phone position.');}).catch(()=>{if(mounted.current)setSharing('Observation was not shared. Check the road API connection.');});
           }
         }
       }
-
-      if (!stream) throw new Error('No video stream obtained');
-
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(() => {});
-      }
-      setCameraActive(true);
-      setIsStreaming(true);
-      setSourceNotice('📱 Phone Camera Active & Streaming to Infotainment');
-      
-      const target = pairTarget || manualPairInput;
-      if (target) {
-        connectToCockpitPeer(target);
-      }
-    } catch (err: any) {
-      console.warn('Camera permission note:', err);
-      setSourceNotice('Camera: ' + (err.message || 'Please grant camera access.'));
-    }
-  };
-
-  // Attempt initial stream or fallback loop
-  useEffect(() => {
-    if (videoSource === 'sample_video') {
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-        videoRef.current.src = './road_sample.mp4';
-        videoRef.current.loop = true;
-        videoRef.current.muted = true;
-        videoRef.current.playsInline = true;
-        videoRef.current.play().catch(() => {});
-      }
-    } else if (videoSource === 'camera') {
-      startHardwareCamera();
-    }
-  }, [facingMode]);
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && videoRef.current) {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      videoRef.current.srcObject = null;
-      videoRef.current.src = URL.createObjectURL(file);
-      videoRef.current.loop = true;
-      videoRef.current.muted = true;
-      videoRef.current.play();
-      setVideoSource('custom_file');
-    }
-  };
-
-  // Oscilloscope Shockwave Animation Loop
-  useEffect(() => {
-    let animId: number;
-    const canvas = waveformCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const renderWave = () => {
-      const w = canvas.width;
-      const h = canvas.height;
-      ctx.clearRect(0, 0, w, h);
-
-      waveformHistoryRef.current.shift();
-      const baseJitter = (Math.random() - 0.5) * 4;
-      const spikeVal = isBumpSpike ? (Math.random() > 0.5 ? 24 : -24) : baseJitter;
-      waveformHistoryRef.current.push(spikeVal);
-
-      // Baseline
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, h / 2);
-      ctx.lineTo(w, h / 2);
-      ctx.stroke();
-
-      // Waveform line
-      ctx.lineWidth = 2.5;
-      const step = w / (waveformHistoryRef.current.length - 1);
-      ctx.beginPath();
-      waveformHistoryRef.current.forEach((val, i) => {
-        const x = i * step;
-        const y = h / 2 + val;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-
-      const grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, '#38bdf8');
-      grad.addColorStop(0.65, isBumpSpike ? '#f59e0b' : '#38bdf8');
-      grad.addColorStop(0.85, isBumpSpike ? '#ef4444' : '#38bdf8');
-      grad.addColorStop(1, '#38bdf8');
-      ctx.strokeStyle = grad;
-      ctx.stroke();
-
-      animId = requestAnimationFrame(renderWave);
-    };
-
-    animId = requestAnimationFrame(renderWave);
-    return () => cancelAnimationFrame(animId);
-  }, [isBumpSpike]);
-
-  // Frame Capture for BroadcastChannel & WebSocket (Smooth 200ms, Non-blocking Zero-Lag)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (!videoRef.current || !canvasRef.current) return;
-      const v = videoRef.current;
-      const c = canvasRef.current;
-      if (v.readyState < 2) return;
-
-      c.width = 240;
-      c.height = 135;
-      const ctx = c.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(v, 0, 0, 240, 135);
-      const b64 = c.toDataURL('image/jpeg', 0.45);
-
-      const tel = telemetryRef.current;
-
-      // Send over BroadcastChannel to Infotainment
-      bcRef.current?.postMessage({
-        camera_b64: b64,
-        speed_kmh: tel.speedKmh,
-        z_accel_g: tel.zAccelG,
-        road_curve: tel.roadCurve,
-        hazards: tel.activeHazards,
-        fps: tel.fps,
-      });
-
-      // Send over WebRTC DataConnection fallback if open
-      if (dataConnRef.current && dataConnRef.current.open) {
-        try {
-          dataConnRef.current.send({
-            camera_b64: b64,
-            speed_kmh: tel.speedKmh,
-            z_accel_g: tel.zAccelG,
-            road_curve: tel.roadCurve,
-            hazards: tel.activeHazards,
-          });
-        } catch (e) {}
-      }
-
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            frame_base64: b64,
-            telemetry: {
-              speed_kmh: tel.speedKmh,
-              z_accel_g: tel.zAccelG,
-              road_geometry: { curve_type: tel.roadCurve },
-            },
-            latest_hazards: tel.activeHazards,
-          })
-        );
-      }
-    }, 200);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  // Bump Trigger
-  const triggerBumpSim = (gVal: number = 2.4) => {
-    setZAccelG(gVal);
-    setIsBumpSpike(true);
-    setCriticalAlert(`POTHOLE SHOCKWAVE DETECTED (${gVal}G)`);
-
-    if ('vibrate' in navigator) {
-      navigator.vibrate([150, 50, 200]);
-    }
-
-    if (audioEnabled && 'speechSynthesis' in window) {
-      try {
-        const u = new SpeechSynthesisUtterance('Caution! Pothole shock detected!');
-        u.rate = 1.1;
-        window.speechSynthesis.speak(u);
-      } catch (e) {}
-    }
-
-    setTimeout(() => {
-      setIsBumpSpike(false);
-      setZAccelG(1.02);
-      setCriticalAlert(null);
-    }, 2800);
-  };
-
-  return (
-    <div className="w-full max-w-5xl mx-auto p-2 sm:p-4 font-['Plus_Jakarta_Sans',sans-serif] flex flex-col items-center select-none">
-      
-      {/* WINDSHIELD SUCTION MOUNT BRACKET FRAME (Slide 6.1 & Slide 10.1) */}
-      <div className="relative w-full max-w-3xl flex flex-col items-center">
-        
-        {/* Silver Suction Arm */}
-        <div className="w-36 h-8 bg-gradient-to-b from-slate-300 via-slate-400 to-slate-500 rounded-t-2xl shadow-lg border-t border-white/40 flex items-center justify-center relative -mb-2 z-0">
-          <div className="w-14 h-2.5 bg-slate-700/80 rounded-full border border-slate-600 shadow-inner"></div>
-        </div>
-
-        {/* Pivot Ring Behind Phone */}
-        <div className="w-48 h-5 bg-gradient-to-b from-slate-400 to-slate-600 rounded-lg shadow-md -mb-2 z-0 border border-slate-400"></div>
-
-        {/* SMARTPHONE CHASSIS */}
-        <div className="relative w-full aspect-[16/9] min-h-[380px] max-h-[540px] bg-black border-[10px] sm:border-[14px] border-[#1a1f2c] rounded-[32px] sm:rounded-[40px] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col z-10 ring-1 ring-white/20">
-          
-          {/* Top Bar with Badges: THERMAL: WARM and Google Camera */}
-          <div className="absolute top-2.5 left-3 right-3 z-30 flex items-center justify-between text-xs font-mono pointer-events-none">
-            <div className="w-6 h-6 rounded-full bg-black/60 border border-white/20 flex items-center justify-center text-white text-xs">
-              ✕
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-full bg-[#f59e0b] text-black font-extrabold text-[10px] tracking-wider uppercase shadow-md">
-                THERMAL: WARM
-              </span>
-
-              <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-black/70 border border-emerald-500/50 text-[10px] font-bold text-emerald-400 backdrop-blur-md">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                <span>Google Camera</span>
-              </div>
-            </div>
-          </div>
-
-          {/* MAIN CAMERA / ROAD VIDEO VIEWPORT */}
-          <div className="relative flex-1 w-full h-full bg-[#0d1117] overflow-hidden flex items-center justify-center">
-            <video
-              ref={videoRef}
-              playsInline
-              muted
-              autoPlay
-              loop
-              className="w-full h-full object-cover"
-            />
-            <canvas ref={canvasRef} className="hidden" />
-
-            {/* ACTIVATION OVERLAY IF CAMERA NOT YET STARTED BY USER GESTURE */}
-            {!cameraActive && (
-              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex flex-col items-center justify-center p-4 text-center">
-                <button
-                  onClick={startHardwareCamera}
-                  className="px-6 py-3.5 bg-[#22c55e] hover:bg-emerald-600 text-black font-black text-sm rounded-2xl shadow-2xl flex items-center gap-2.5 transition-all transform active:scale-95 animate-pulse"
-                >
-                  <Camera className="w-5 h-5" />
-                  <span>TAP TO START PHONE CAMERA &amp; STREAM</span>
-                </button>
-                <p className="text-xs text-slate-300 mt-2.5 font-sans">
-                  Allows streaming your live phone camera feed to the Infotainment display
-                </p>
-              </div>
-            )}
-
-            {/* DYNAMIC DETECTED HAZARD BOUNDING BOXES (ML Detections) */}
-            {activeHazards.map((hz, idx) => {
-              const isPed = hz.hazard_type === 'PEDESTRIAN';
-              const isAnimal = hz.hazard_type === 'ANIMAL';
-              const isWater = hz.hazard_type === 'WATERLOGGING';
-              const color = isPed ? '#ef4444' : isAnimal ? '#dc2626' : isWater ? '#06b6d4' : '#f59e0b';
-              const textColor = isPed || isAnimal ? 'text-white' : 'text-black';
-
-              const w = Math.max(6, (hz.bbox[2] || 0) - (hz.bbox[0] || 0));
-              const h = Math.max(6, (hz.bbox[3] || 0) - (hz.bbox[1] || 0));
-
-              return (
-                <div
-                  key={idx}
-                  className="absolute border-2 pointer-events-none z-20 transition-all duration-150 animate-pulse"
-                  style={{
-                    borderColor: color,
-                    backgroundColor: `${color}25`,
-                    boxShadow: `0 0 15px ${color}80`,
-                    left: `${hz.bbox[0]}%`,
-                    top: `${hz.bbox[1]}%`,
-                    width: `${w}%`,
-                    height: `${h}%`,
-                  }}
-                >
-                  <span
-                    className={`absolute -top-5 left-0 font-extrabold text-[10px] px-1.5 py-0.5 rounded-sm uppercase tracking-wide font-mono shadow ${textColor}`}
-                    style={{ backgroundColor: color }}
-                  >
-                    {hz.label || hz.hazard_type} {Math.round(hz.confidence * 100)}%
-                  </span>
-                  {hz.distance_m !== undefined && (
-                    <span className="absolute -bottom-4 right-0 bg-black/80 text-white font-mono text-[9px] px-1 rounded border border-white/10">
-                      {Math.round(hz.distance_m)}m
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-
-            {criticalAlert && (
-              <div className="absolute top-12 left-6 right-6 z-40 bg-[#ef4444]/95 border-2 border-white text-white p-2.5 rounded-xl text-center font-bold text-xs shadow-2xl backdrop-blur-md animate-bounce">
-                💥 {criticalAlert}
-              </div>
-            )}
-          </div>
-
-          {/* BOTTOM SECTION: OSCILLOSCOPE & G-FORCE METER (Slide 6.1 & 10.1) */}
-          <div className="relative w-full bg-[#0a0d14]/95 border-t border-white/[0.08] p-2 sm:p-3 px-3 sm:px-4 z-30 flex flex-col gap-1.5 font-mono">
-            
-            {/* Status Badges */}
-            <div className="flex items-center justify-between text-[10px]">
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded-full bg-[#f59e0b]/20 border border-[#f59e0b]/40 text-[#f59e0b] font-bold uppercase">
-                  THERMAL: WARM
-                </span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold uppercase">
-                  FLASHING
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-400 font-bold uppercase text-[9px]">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                <span>
-                  {isPeerStreaming
-                    ? `STREAMING TO COCKPIT (${pairTarget})`
-                    : pairTarget
-                    ? `PAIRING TO ${pairTarget}`
-                    : 'WEBSOCKET: STREAMING'}
-                </span>
-              </div>
-            </div>
-
-            {/* ACCELEROMETER SHOCK OSCILLOSCOPE */}
-            <div className="relative w-full bg-[#06080e] border border-white/10 rounded-xl p-1.5 px-2 flex flex-col justify-between overflow-hidden">
-              <div className="flex items-center justify-between text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">
-                <span>ACCELEROMETER SHOCK</span>
-                <span className="text-[9px] text-slate-500">...</span>
-              </div>
-
-              <div className="relative w-full h-11 flex items-center">
-                <canvas
-                  ref={waveformCanvasRef}
-                  width={600}
-                  height={44}
-                  className="w-full h-full object-contain"
-                />
-
-                {/* IMU SHOCK SPIKE Pointer Tag */}
-                <div
-                  className={`absolute top-0 right-1/4 transition-opacity duration-300 flex flex-col items-center ${
-                    isBumpSpike ? 'opacity-100 scale-105' : 'opacity-85'
-                  }`}
-                >
-                  <span className="bg-[#f59e0b] text-black font-extrabold text-[9px] px-1.5 py-0.2 rounded-sm shadow-md font-mono">
-                    IMU SHOCK SPIKE
-                  </span>
-                  <div className="w-0.5 h-2 bg-[#f59e0b]"></div>
-                </div>
-              </div>
-
-              {/* G-FORCE Z-AXIS METER BAR */}
-              <div className="w-full mt-1 flex items-center gap-2 text-[10px]">
-                <span className="text-slate-400 font-bold uppercase tracking-wider text-[9px] whitespace-nowrap">
-                  G-force Z-axis
-                </span>
-
-                <div className="relative flex-1 h-2.5 rounded-full bg-slate-800 overflow-hidden border border-white/10">
-                  <div
-                    className="h-full bg-gradient-to-r from-blue-500 via-amber-400 to-red-500 transition-all duration-150 rounded-full"
-                    style={{
-                      width: `${Math.min(100, Math.max(10, ((zAccelG - 0.8) / 2.0) * 100))}%`,
-                    }}
-                  />
-                </div>
-
-                <span className="font-bold text-white text-[10px] min-w-[38px] text-right">
-                  {zAccelG.toFixed(2)}G
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Side Clamp Pads */}
-        <div className="absolute top-1/2 -left-2.5 -translate-y-1/2 w-3.5 h-20 bg-slate-700 rounded-r-md border border-slate-500 shadow-lg z-20"></div>
-        <div className="absolute top-1/2 -right-2.5 -translate-y-1/2 w-3.5 h-20 bg-slate-700 rounded-l-md border border-slate-500 shadow-lg z-20"></div>
-      </div>
-
-      {/* QUICK SIGHT TRIGGER BAR (SLIDES 6 & 10) */}
-      <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 bg-[#0a0f1d] border border-cyan-500/30 p-2 px-3 rounded-xl text-xs font-mono">
-        <span className="text-cyan-400 font-bold text-[11px] flex items-center gap-1">
-          <span>🧪 SIGHT:</span>
-        </span>
-        <button
-          onClick={() => applySightMode('clear')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'clear' ? 'bg-emerald-600 text-white shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🟢 Clear Road (Clean)
-        </button>
-        <button
-          onClick={() => applySightMode('pedestrian')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'pedestrian' ? 'bg-red-600 text-white shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🚶 Pedestrian (88%)
-        </button>
-        <button
-          onClick={() => applySightMode('pothole')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'pothole' ? 'bg-amber-600 text-black shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🕳️ Pothole (92%)
-        </button>
-        <button
-          onClick={() => applySightMode('cattle')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'cattle' ? 'bg-orange-600 text-white shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🐄 Cattle (89%)
-        </button>
-        <button
-          onClick={() => applySightMode('water')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'water' ? 'bg-cyan-600 text-white shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🌊 Water (91%)
-        </button>
-        <button
-          onClick={() => applySightMode('auto')}
-          className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all ${
-            sightMode === 'auto' ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-800 text-slate-300 hover:text-white'
-          }`}
-        >
-          🤖 Auto Edge CV
-        </button>
-      </div>
-
-      {/* CONTROLS & MANUAL COCKPIT PAIRING BAR */}
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-2 bg-[#0d1322] border border-[#1e293b] p-2.5 px-4 rounded-2xl text-xs font-mono">
-        <button
-          onClick={startHardwareCamera}
-          className="px-3.5 py-1.5 bg-[#22c55e] hover:bg-emerald-600 text-black rounded-xl font-bold flex items-center gap-1.5 transition-all active:scale-95 shadow-lg shadow-green-500/20"
-        >
-          <Camera className="w-3.5 h-3.5" />
-          <span>{cameraActive ? 'Camera Live' : 'Start Phone Camera'}</span>
-        </button>
-
-        <button
-          onClick={() => triggerBumpSim(2.4)}
-          className="px-3 py-1.5 bg-[#EA4335] text-white hover:bg-red-600 rounded-xl font-bold flex items-center gap-1.5 transition-all active:scale-95 shadow-lg shadow-red-500/20"
-        >
-          <Zap className="w-3.5 h-3.5" />
-          <span>Bump Spike (2.4G)</span>
-        </button>
-
-        <div className="flex items-center bg-[#090D16] border border-[#1E293B] rounded-xl p-0.5">
-          <button
-            onClick={() => setVideoSource('camera')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-              videoSource === 'camera' ? 'bg-[#4285F4] text-white' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            📱 Phone Cam
-          </button>
-          <button
-            onClick={() => setVideoSource('sample_video')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-              videoSource === 'sample_video' ? 'bg-[#4285F4] text-white' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            🛣️ Road Loop
-          </button>
-        </div>
-
-        {/* Cockpit WebRTC Pair Input */}
-        <div className="flex items-center gap-1 bg-[#090D16] border border-[#1E293B] rounded-xl p-0.5 px-2">
-          <span className="text-[10px] text-slate-400">Cockpit ID:</span>
-          <input
-            type="text"
-            value={manualPairInput || pairTarget}
-            onChange={(e) => setManualPairInput(e.target.value)}
-            placeholder="margai-1234"
-            className="bg-transparent border-none text-white text-xs w-24 px-1 focus:outline-none font-mono"
-          />
-          <button
-            onClick={() => {
-              const code = manualPairInput || pairTarget;
-              setPairTarget(code);
-              connectToCockpitPeer(code);
-            }}
-            className="px-2 py-0.5 rounded bg-[#38bdf8] text-slate-900 text-[10px] font-bold"
-          >
-            Link
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+      if(!stopped)timer=setTimeout(loop,160);
+    };void loop();return()=>{stopped=true;clearTimeout(timer);};
+  },[phase,backend]);
+  useEffect(()=>{
+    if(phase!=='running')return;
+    const interval=setInterval(()=>{const v=video.current;if(!v||v.readyState<2||!v.videoWidth)return;const cv=jpeg.current;cv.width=320;cv.height=Math.round(320*v.videoHeight/v.videoWidth);cv.getContext('2d')!.drawImage(v,0,0,cv.width,cv.height);const data=sensorRef.current;
+      bridge.current!.send({telemetry:data,camera_b64:cv.toDataURL('image/jpeg',.5),speed_kmh:data.gpsStatus==='active'&&data.gps?.speedMps!=null?data.gps.speedMps*3.6:null,gps:data.gps,gps_status:data.gpsStatus,g_force:data.gForce,z_accel_g:data.gForce,rotation:data.rotation,heading:data.gps?.heading??data.heading,motion_status:data.motionStatus,model_status:vision.current!.state,hazards:tracker.current.tracks.filter(t=>t.misses===0&&t.cls!=='vehicle').map(t=>({hazard_type:t.cls.toUpperCase(),confidence:t.conf,bbox:[t.box.x*100,t.box.y*100,(t.box.x+t.box.w)*100,(t.box.y+t.box.h)*100],label:label(t),risk_level:'MEDIUM',...(data.gps?{geo:{lat:data.gps.latitude,lng:data.gps.longitude,accuracy:data.gps.accuracy}}:{})}))});
+    },300);return()=>clearInterval(interval);
+  },[phase]);
+  const staleGPS=!!telemetry.gps&&(telemetry.gpsStatus!=='active'||now-telemetry.gps.timestamp>15000);const staleMotion=!!telemetry.motionAt&&now-telemetry.motionAt>3000;
+  const ready=models.pothole==='ready'||models.objects==='ready';
+  return <section className="phone-camera" aria-label="Mobile camera and sensors">
+    <header className="phone-heading"><div><span className="eyebrow">ON-DEVICE ROAD VISION</span><h1>Your phone. Real readings.</h1><p>Camera detection, GPS and motion from this device.</p></div><span className={`phone-tag ${phase==='running'?'good':''}`}>{phase==='running'?'Live camera':'Camera off'}</span></header>
+    {!window.isSecureContext&&<div className="phone-error" role="alert">This connection is insecure. Open the HTTPS phone link to enable camera, location and motion.</div>}
+    {error&&<div className="phone-error" role="alert"><AlertTriangle size={18}/>{error}</div>}
+    <div className="phone-layout"><div className="phone-view-column"><div className="phone-view">
+      <video ref={video} playsInline muted aria-label="Live phone camera"/>
+      {phase==='running'&&tracks.map(track=><div className="phone-detection" key={track.id} style={{left:`${track.box.x*100}%`,top:`${track.box.y*100}%`,width:`${track.box.w*100}%`,height:`${track.box.h*100}%`,borderColor:COLORS[track.cls]}}><span style={{background:COLORS[track.cls]}}>{label(track)} · {Math.round(track.conf*100)}%</span></div>)}
+      {phase!=='running'&&<div className="phone-start"><Camera size={36}/><h2>See what the camera sees.</h2><p>Start to request camera, location and motion access. Detection runs on this phone.</p><button className="premium-button" onClick={()=>void start()} disabled={phase==='starting'}>{phase==='starting'?'Starting camera…':'Start camera & sensors'}</button></div>}
+      {phase==='running'&&<div className="phone-frame-status" role="status">{ready?tracks.length?`${tracks.length} objects detected`:'No detections in the current frame':'Camera active · detection model not ready'}{inference.frames>0&&` · ${Math.round(inference.ms)} ms objects · ${Math.round(vision.current?.road.ms||0)} ms road worker`}</div>}
+    </div><div className="phone-toolbar"><button className="premium-button-secondary" onClick={()=>{const next=facing==='environment'?'user':'environment';setFacing(next);void start(next);}} disabled={phase!=='running'}><RotateCw size={16}/>Switch camera</button><button className="premium-button-secondary" onClick={stop} disabled={phase==='off'}><CameraOff size={16}/>Stop camera & sensors</button></div>
+    <section className="phone-models"><h2><Cpu size={17}/>On-device models</h2><div className="phone-model-row"><span><strong>Potholes</strong><small>YOLOv8 · dedicated pothole model</small></span><span className={models.pothole==='ready'?'good':''}>{stateLabel(models.pothole)}</span></div><div className="phone-model-row"><span><strong>People, animals & vehicles</strong><small>Google EfficientDet-Lite0 · COCO</small></span><span className={models.objects==='ready'?'good':''}>{stateLabel(models.objects)}</span></div>
+    {(models.pothole==='error'||models.objects==='error')&&<><p className="phone-error">{models.pothole==='error'?'The pothole model could not run. ':''}{models.objects==='error'?'The object model could not run. ':''}Camera and sensors remain available.</p><button className="text-button" onClick={()=>void loadModels()}><RefreshCw size={15}/>Retry models</button><details><summary>Model error details</summary><pre>{models.potholeError}\n{models.objectsError}</pre></details></>}
+    <p className="phone-note">Boxes are model predictions. Pothole detection needs a clear view of the road. Distance and road safety are not verified from a single image.</p></section>
+    <PhoneLocationMap fix={telemetry.gps} heading={telemetry.gps?.heading??telemetry.heading} stale={staleGPS}/>
+    <section className="phone-pair"><h2><Radio size={17}/>Car display</h2><label htmlFor="phone-display-id">Display ID</label><div className="phone-pair-input"><input id="phone-display-id" value={target} onChange={e=>setTarget(e.target.value)} placeholder="margai-1234" autoCapitalize="none" autoCorrect="off"/><button className="premium-button" disabled={!validTarget(target)} onClick={()=>{bridge.current!.connect(target,backend);bridge.current!.attach(stream.current);}}>Connect</button></div><p role="status" className={link.state==='error'?'bad':''}>{link.message}{link.transport?` · ${link.transport}`:''}</p></section>
+    </div><aside className="phone-sensors" aria-label="Device sensor readings">
+      <section><div className="sensor-title"><h2><MapPin size={17}/>GPS / location</h2><span className={telemetry.gpsStatus==='active'&&!staleGPS?'good':''}>{staleGPS?'Reading is stale':stateLabel(telemetry.gpsStatus)}</span></div><dl><dt>Latitude</dt><dd>{fmt(telemetry.gps?.latitude,6)}</dd><dt>Longitude</dt><dd>{fmt(telemetry.gps?.longitude,6)}</dd><dt>Accuracy</dt><dd>{telemetry.gps?`±${fmt(telemetry.gps.accuracy,0)} m`:'—'}</dd><dt>Speed from GPS</dt><dd>{telemetry.gps?.speedMps!=null?`${fmt(telemetry.gps.speedMps*3.6)} km/h`:'Not reported'}</dd><dt>Altitude</dt><dd>{telemetry.gps?.altitude!=null?`${fmt(telemetry.gps.altitude)} m`:'Not reported'}</dd><dt>Last fix</dt><dd>{telemetry.gps?`${Math.max(0,Math.round((now-telemetry.gps.timestamp)/1000))} s ago`:'No fix yet'}</dd></dl>{telemetry.gpsError&&<p className="phone-note bad" role="status">{telemetry.gpsError}</p>}<button className="text-button" onClick={()=>sensors.current!.startGPS()}><RefreshCw size={14}/>Enable / retry location</button></section>
+      <section><div className="sensor-title"><h2><Activity size={17}/>Accelerometer</h2><span className={telemetry.motionStatus==='active'&&!staleMotion?'good':''}>{staleMotion?'Reading is stale':stateLabel(telemetry.motionStatus)}</span></div><div className="phone-gforce">{fmt(telemetry.gForce,2)}<small> g</small></div><p className="phone-note">Acceleration magnitude including gravity. At rest, about 1 g.</p><dl><dt>Acceleration X</dt><dd>{fmt(telemetry.acceleration?.x,2)} m/s²</dd><dt>Acceleration Y</dt><dd>{fmt(telemetry.acceleration?.y,2)} m/s²</dd><dt>Acceleration Z</dt><dd>{fmt(telemetry.acceleration?.z,2)} m/s²</dd></dl></section>
+      <section><div className="sensor-title"><h2><RotateCw size={17}/>Gyroscope</h2><span className={telemetry.gyroStatus==='active'?'good':''}>{stateLabel(telemetry.gyroStatus)}</span></div><dl><dt>Alpha</dt><dd>{fmt(telemetry.rotation?.alpha,2)} °/s</dd><dt>Beta</dt><dd>{fmt(telemetry.rotation?.beta,2)} °/s</dd><dt>Gamma</dt><dd>{fmt(telemetry.rotation?.gamma,2)} °/s</dd></dl></section>
+      <section><div className="sensor-title"><h2><Compass size={17}/>Compass</h2><span className={telemetry.compassStatus==='active'?'good':''}>{stateLabel(telemetry.compassStatus)}</span></div><div className="phone-gforce">{fmt(telemetry.gps?.heading??telemetry.heading,0)}<small>°</small></div><p className="phone-note">A measured GPS heading takes priority. Relative orientation is not treated as north.</p><button className="text-button" onClick={()=>void sensors.current!.startMotion()}><RefreshCw size={14}/>Enable / retry motion</button><p className="phone-note">If unavailable on Android: enable Motion sensors in Chrome’s site settings. Some devices do not expose these sensors to websites.</p></section>
+      <p className="phone-note" role="status">{sharing}</p>
+    </aside></div>
+  </section>;
 };

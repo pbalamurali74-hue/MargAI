@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import http from 'http';
 import dotenv from 'dotenv';
 import { createExpressApp } from './server';
@@ -11,6 +12,7 @@ const server = http.createServer(app);
 
 // Initialize WebSocket Relay Server
 realtimeRelay.init(server);
+setInterval(() => realtimeRelay.sweepExpired(), 5000);
 
 server.listen(PORT, () => {
   console.log(`=======================================================`);
